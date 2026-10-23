@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	dbgen "github.com/RodolfoBonis/rbnotes-api/db/gen"
@@ -62,6 +63,7 @@ type Runner interface {
 // Deps injeta as dependências do serviço. Runner/Workdir só são necessários no ai-worker.
 type Deps struct {
 	Queries    *dbgen.Queries
+	Pool       *pgxpool.Pool
 	Queue      queue.Queue
 	Redis      *redis.Client
 	Runner     Runner
@@ -74,6 +76,7 @@ type Deps struct {
 // Service coordena pedidos (API) e execuções (ai-worker).
 type Service struct {
 	q          *dbgen.Queries
+	pool       *pgxpool.Pool
 	queue      queue.Queue
 	rdb        *redis.Client
 	runner     Runner
@@ -89,7 +92,7 @@ func New(d Deps) *Service {
 	if m == "" {
 		m = "sonnet"
 	}
-	return &Service{q: d.Queries, queue: d.Queue, rdb: d.Redis, runner: d.Runner, model: m, workdir: d.Workdir, dailyLimit: d.DailyLimit, logger: d.Logger}
+	return &Service{q: d.Queries, pool: d.Pool, queue: d.Queue, rdb: d.Redis, runner: d.Runner, model: m, workdir: d.Workdir, dailyLimit: d.DailyLimit, logger: d.Logger}
 }
 
 // jobPayload é o payload do job na fila.

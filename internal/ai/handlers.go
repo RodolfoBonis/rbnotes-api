@@ -185,21 +185,35 @@ func withDefaults(req claude.Request, aj dbgen.AiJob, system string) claude.Requ
 	return req
 }
 
-// writeEntity grava uma entidade sincronizável produzida pela IA (aloca change_seq e faz upsert).
+// writeEntity grava uma entidade sincronizável produzida pela IA. A alocação do change_seq
+// (NextChangeSeq) e o upsert rodam na MESMA transação: o lock da linha em sync_cursors fica retido
+// até o upsert commitar, serializando contra o Push do sync. Sem isso, um Push concorrente poderia
+// alocar um change_seq MAIOR e commitar antes deste upsert, fazendo o cursor de um pull avançar além
+// desta linha — que o pull então pularia para sempre.
 func (s *Service) writeEntity(ctx context.Context, userID pgtype.UUID, entity, id string, data []byte) error {
-	seq, err := s.q.NextChangeSeq(ctx, userID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("ai: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := s.q.WithTx(tx)
+	seq, err := q.NextChangeSeq(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("ai: change_seq: %w", err)
 	}
 	ts := pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}
 	switch entity {
 	case "note_ai":
-		return s.q.UpsertNoteAi(ctx, dbgen.UpsertNoteAiParams{UserID: userID, ID: id, UpdatedAt: ts, Deleted: false, Data: data, ChangeSeq: seq})
+		err = q.UpsertNoteAi(ctx, dbgen.UpsertNoteAiParams{UserID: userID, ID: id, UpdatedAt: ts, Deleted: false, Data: data, ChangeSeq: seq})
 	case "chat_message":
-		return s.q.UpsertChatMessage(ctx, dbgen.UpsertChatMessageParams{UserID: userID, ID: id, UpdatedAt: ts, Deleted: false, Data: data, ChangeSeq: seq})
+		err = q.UpsertChatMessage(ctx, dbgen.UpsertChatMessageParams{UserID: userID, ID: id, UpdatedAt: ts, Deleted: false, Data: data, ChangeSeq: seq})
 	default:
 		return fmt.Errorf("ai: entidade inesperada %q", entity)
 	}
+	if err != nil {
+		return fmt.Errorf("ai: upsert %s: %w", entity, err)
+	}
+	return tx.Commit(ctx)
 }
 
 // indexEnrich atualiza o índice FTS a partir do enrich (título + tldr + transcrição).

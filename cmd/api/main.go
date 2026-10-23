@@ -87,7 +87,7 @@ func run() error {
 		rdb = nil
 	} else {
 		defer func() { _ = rdb.Close() }()
-		aiSvc = ai.New(ai.Deps{Queries: queries, Queue: jobs, Redis: rdb, Model: cfg.AI.Model, DailyLimit: cfg.AI.DailyLimit, Logger: logger})
+		aiSvc = ai.New(ai.Deps{Queries: queries, Pool: pool, Queue: jobs, Redis: rdb, Model: cfg.AI.Model, DailyLimit: cfg.AI.DailyLimit, Logger: logger})
 	}
 
 	// Áudio (MinIO). Sem credenciais/endpoint acessível, sobe com áudio desligado (501 nas rotas).

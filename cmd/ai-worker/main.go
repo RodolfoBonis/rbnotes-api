@@ -69,7 +69,7 @@ func run() error {
 	queries := dbgen.New(pool)
 	jobs := queue.NewPostgres(pool, queue.DefaultBackoff)
 	svc := ai.New(ai.Deps{
-		Queries: queries, Queue: jobs, Redis: rdb,
+		Queries: queries, Pool: pool, Queue: jobs, Redis: rdb,
 		Runner: claude.New(cfg.AI.ClaudeBin, cfg.AI.OAuthToken, cfg.AI.Home, logger),
 		Model:  cfg.AI.Model, Workdir: cfg.AI.Workdir, DailyLimit: cfg.AI.DailyLimit, Logger: logger,
 	})
