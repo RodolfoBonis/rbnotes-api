@@ -28,7 +28,7 @@ func (q *Queries) CompleteAudio(ctx context.Context, arg CompleteAudioParams) er
 }
 
 const getAudio = `-- name: GetAudio :one
-SELECT user_id, note_id, object_key, upload_id, total_parts, parts, content_type, size, completed, created_at, updated_at FROM note_audio WHERE user_id = $1 AND note_id = $2
+SELECT user_id, note_id, object_key, upload_id, total_parts, parts, content_type, size, completed, created_at, updated_at, part_sizes FROM note_audio WHERE user_id = $1 AND note_id = $2
 `
 
 type GetAudioParams struct {
@@ -51,25 +51,24 @@ func (q *Queries) GetAudio(ctx context.Context, arg GetAudioParams) (NoteAudio, 
 		&i.Completed,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PartSizes,
 	)
 	return i, err
 }
 
-const setAudioPart = `-- name: SetAudioPart :one
-UPDATE note_audio SET parts = parts || $3::jsonb, updated_at = now()
-WHERE user_id = $1 AND note_id = $2
-RETURNING user_id, note_id, object_key, upload_id, total_parts, parts, content_type, size, completed, created_at, updated_at
+const getAudioForUpdate = `-- name: GetAudioForUpdate :one
+SELECT user_id, note_id, object_key, upload_id, total_parts, parts, content_type, size, completed, created_at, updated_at, part_sizes FROM note_audio WHERE user_id = $1 AND note_id = $2 FOR UPDATE
 `
 
-type SetAudioPartParams struct {
+type GetAudioForUpdateParams struct {
 	UserID pgtype.UUID
 	NoteID string
-	Part   []byte
 }
 
-// SetAudioPart grava o ETag de uma parte (merge no mapa parts).
-func (q *Queries) SetAudioPart(ctx context.Context, arg SetAudioPartParams) (NoteAudio, error) {
-	row := q.db.QueryRow(ctx, setAudioPart, arg.UserID, arg.NoteID, arg.Part)
+// GetAudioForUpdate trava a linha da nota (FOR UPDATE) para serializar os PUTs concorrentes de
+// partes da MESMA nota: só um envio por nota avança por vez, evitando dupla finalização.
+func (q *Queries) GetAudioForUpdate(ctx context.Context, arg GetAudioForUpdateParams) (NoteAudio, error) {
+	row := q.db.QueryRow(ctx, getAudioForUpdate, arg.UserID, arg.NoteID)
 	var i NoteAudio
 	err := row.Scan(
 		&i.UserID,
@@ -83,6 +82,49 @@ func (q *Queries) SetAudioPart(ctx context.Context, arg SetAudioPartParams) (Not
 		&i.Completed,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PartSizes,
+	)
+	return i, err
+}
+
+const setAudioPart = `-- name: SetAudioPart :one
+UPDATE note_audio
+   SET parts = parts || $3::jsonb,
+       part_sizes = part_sizes || $4::jsonb,
+       updated_at = now()
+WHERE user_id = $1 AND note_id = $2
+RETURNING user_id, note_id, object_key, upload_id, total_parts, parts, content_type, size, completed, created_at, updated_at, part_sizes
+`
+
+type SetAudioPartParams struct {
+	UserID   pgtype.UUID
+	NoteID   string
+	Part     []byte
+	PartSize []byte
+}
+
+// SetAudioPart grava o ETag e o tamanho de uma parte (merge nos mapas parts/part_sizes).
+func (q *Queries) SetAudioPart(ctx context.Context, arg SetAudioPartParams) (NoteAudio, error) {
+	row := q.db.QueryRow(ctx, setAudioPart,
+		arg.UserID,
+		arg.NoteID,
+		arg.Part,
+		arg.PartSize,
+	)
+	var i NoteAudio
+	err := row.Scan(
+		&i.UserID,
+		&i.NoteID,
+		&i.ObjectKey,
+		&i.UploadID,
+		&i.TotalParts,
+		&i.Parts,
+		&i.ContentType,
+		&i.Size,
+		&i.Completed,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PartSizes,
 	)
 	return i, err
 }
@@ -93,8 +135,8 @@ VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (user_id, note_id) DO UPDATE
    SET object_key = EXCLUDED.object_key, upload_id = EXCLUDED.upload_id,
        total_parts = EXCLUDED.total_parts, content_type = EXCLUDED.content_type,
-       parts = '{}'::jsonb, completed = false, size = 0, updated_at = now()
-RETURNING user_id, note_id, object_key, upload_id, total_parts, parts, content_type, size, completed, created_at, updated_at
+       parts = '{}'::jsonb, part_sizes = '{}'::jsonb, completed = false, size = 0, updated_at = now()
+RETURNING user_id, note_id, object_key, upload_id, total_parts, parts, content_type, size, completed, created_at, updated_at, part_sizes
 `
 
 type UpsertAudioInitParams struct {
@@ -129,6 +171,7 @@ func (q *Queries) UpsertAudioInit(ctx context.Context, arg UpsertAudioInitParams
 		&i.Completed,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PartSizes,
 	)
 	return i, err
 }

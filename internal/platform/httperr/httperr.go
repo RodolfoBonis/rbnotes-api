@@ -33,6 +33,10 @@ const (
 	// KindUnavailable sinaliza indisponibilidade temporária (ex.: provider OIDC ainda carregando).
 	// Status 503 — o cliente pode re-tentar em instantes.
 	KindUnavailable
+	// KindPayloadTooLarge sinaliza corpo acima do limite aceito. Status 413.
+	KindPayloadTooLarge
+	// KindRangeNotSatisfiable sinaliza um header Range que não cabe no recurso. Status 416.
+	KindRangeNotSatisfiable
 )
 
 func (k Kind) status() int {
@@ -57,6 +61,10 @@ func (k Kind) status() int {
 		return http.StatusNotImplemented
 	case KindUnavailable:
 		return http.StatusServiceUnavailable
+	case KindPayloadTooLarge:
+		return http.StatusRequestEntityTooLarge
+	case KindRangeNotSatisfiable:
+		return http.StatusRequestedRangeNotSatisfiable
 	default:
 		return http.StatusInternalServerError
 	}
@@ -84,6 +92,10 @@ func (k Kind) slug() string {
 		return "not-implemented"
 	case KindUnavailable:
 		return "unavailable"
+	case KindPayloadTooLarge:
+		return "payload-too-large"
+	case KindRangeNotSatisfiable:
+		return "range-not-satisfiable"
 	default:
 		return "internal"
 	}

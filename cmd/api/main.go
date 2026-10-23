@@ -92,7 +92,7 @@ func run() error {
 
 	// Áudio (MinIO). Sem credenciais/endpoint acessível, sobe com áudio desligado (501 nas rotas).
 	var audioSvc *audio.Service
-	audioSvc, aerr := audio.New(ctx, cfg.MinIO, queries, logger)
+	audioSvc, aerr := audio.New(ctx, cfg.MinIO, cfg.Audio.MaxBytes, queries, pool, logger)
 	if aerr != nil {
 		logger.Warn("minio indisponível; áudio desligado", slog.String("err", aerr.Error()))
 		audioSvc = nil

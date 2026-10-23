@@ -18,7 +18,8 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, "rbnotes-api", cfg.Auth.Audience)
-	require.Equal(t, int64(52428800), cfg.Audio.ChunkLimit)
+	require.Equal(t, int64(16777216), cfg.Audio.ChunkLimit)
+	require.Equal(t, int64(2147483648), cfg.Audio.MaxBytes)
 	require.Equal(t, "sonnet", cfg.AI.Model)
 }
 

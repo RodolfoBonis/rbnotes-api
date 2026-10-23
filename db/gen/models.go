@@ -126,6 +126,7 @@ type NoteAudio struct {
 	Completed   bool
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
+	PartSizes   []byte
 }
 
 type NoteSearch struct {

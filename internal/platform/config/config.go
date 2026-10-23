@@ -126,8 +126,11 @@ func (m MinIO) Endpoint() (hostPort string, secure bool) {
 
 // Audio configura os limites do upload em chunks.
 type Audio struct {
-	// ChunkLimit: tamanho máximo de um chunk (Cloudflare limita 100 MB; margem para 50 MB).
-	ChunkLimit int64 `env:"AUDIO_CHUNK_LIMIT" envDefault:"52428800"` // 50 MiB
+	// ChunkLimit: tamanho máximo (e padrão recomendado) de um chunk. 16 MiB equilibra o mínimo de
+	// 5 MiB exigido pelo S3 em partes não finais e o teto de latência por requisição.
+	ChunkLimit int64 `env:"AUDIO_CHUNK_LIMIT" envDefault:"16777216"` // 16 MiB
+	// MaxBytes: teto do áudio completo de uma nota (soma das partes). Default 2 GiB.
+	MaxBytes int64 `env:"AUDIO_MAX_BYTES" envDefault:"2147483648"` // 2 GiB
 }
 
 // AI configura o ai-worker (CLI do Claude Code headless). A API não executa a CLI: só enfileira e
@@ -165,6 +168,9 @@ func Load() (Config, error) {
 	}
 	if cfg.Audio.ChunkLimit <= 0 {
 		return Config{}, fmt.Errorf("carregar config: AUDIO_CHUNK_LIMIT deve ser > 0")
+	}
+	if cfg.Audio.MaxBytes <= 0 {
+		return Config{}, fmt.Errorf("carregar config: AUDIO_MAX_BYTES deve ser > 0")
 	}
 	return cfg, nil
 }
