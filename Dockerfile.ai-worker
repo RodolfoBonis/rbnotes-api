@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+#
+# Imagem do ai-worker (cmd/ai-worker): precisa da CLI do Claude Code (Node) para rodar headless,
+# então usa node:22-slim com usuário não-root — ao contrário da API (distroless). Padrão do
+# jarvis-worker-claude.
+
+ARG GO_VERSION=1.26
+
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
+WORKDIR /src
+RUN apk add --no-cache git ca-certificates
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath -ldflags="-s -w" -o /out/ai-worker ./cmd/ai-worker
+
+FROM node:22-slim AS runtime
+# Versão explícita da CLI: o CD resolve a última no npm e passa aqui (cache só invalida esta camada
+# quando sai versão nova).
+ARG CLAUDE_CODE_VERSION=latest
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force
+COPY --from=builder /out/ai-worker /app/ai-worker
+# HOME gravável: ~/.claude guarda as sessões do --resume do chat (volume em produção).
+ENV HOME=/home/node AI_HOME=/home/node AI_WORKDIR=/home/node/work
+USER node
+WORKDIR /home/node
+EXPOSE 9090
+ENTRYPOINT ["/app/ai-worker"]

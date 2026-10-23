@@ -1,0 +1,575 @@
+openapi: 3.1.0
+info:
+  title: RbNotes API
+  version: "1.0.0"
+  description: |
+    Backend do RbNotes (app desktop pessoal de notas de voz). A transcrição é local no Mac; o
+    backend recebe só texto. Tudo é escopo por usuário (OIDC). Sincronização offline-first (LWW),
+    áudio em chunks para o MinIO e IA assíncrona (Claude Code headless) com resposta via SSE.
+  contact:
+    name: Rodolfo de Bonis
+  license:
+    name: Proprietary
+    url: https://rodolfodebonis.com.br
+
+servers:
+  - url: https://api.notes.rodolfodebonis.com.br/v1
+    description: Produção
+  - url: http://localhost:8080/v1
+    description: Desenvolvimento
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: health
+    description: Probes de saúde (abertas)
+  - name: user
+    description: Identidade do usuário
+  - name: sync
+    description: Sincronização offline-first
+  - name: audio
+    description: Upload/download do áudio das notas
+  - name: ai
+    description: Enriquecimento, chat, ask e auxiliares de IA
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getHealthz
+      summary: Liveness
+      security: []
+      responses:
+        "200":
+          description: Vivo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+  /readyz:
+    get:
+      tags: [health]
+      operationId: getReadyz
+      summary: Readiness (DB + provider OIDC)
+      security: []
+      responses:
+        "200":
+          description: Pronto
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+        "503":
+          description: Indisponível
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+
+  /me:
+    get:
+      tags: [user]
+      operationId: getMe
+      summary: Usuário atual (criado no primeiro request)
+      responses:
+        "200":
+          description: Usuário
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /sync/push:
+    post:
+      tags: [sync]
+      operationId: syncPush
+      summary: Envia mudanças (LWW por updatedAt)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PushRequest" }
+      responses:
+        "200":
+          description: Resultado do push (aplicados + conflitos)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PushResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /sync/pull:
+    get:
+      tags: [sync]
+      operationId: syncPull
+      summary: Busca mudanças após o cursor
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: Cursor monotônico (vazio = do início)
+          schema: { type: string }
+      responses:
+        "200":
+          description: Página de mudanças + novo cursor
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PullResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /notes/{id}/audio:
+    parameters:
+      - $ref: "#/components/parameters/NoteId"
+    put:
+      tags: [audio]
+      operationId: putNoteAudio
+      summary: Envia um chunk do áudio (multipart S3)
+      description: |
+        Cada requisição envia uma parte (`part` de 1 a `total`) como `application/octet-stream`.
+        Quando a última parte chega, o objeto é finalizado. Chunk ≤ 50 MB.
+      parameters:
+        - name: part
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: total
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Parte recebida (completed=true na última)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  part: { type: integer }
+                  completed: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: Upload não iniciado (envie a parte 1 primeiro)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+    get:
+      tags: [audio]
+      operationId: getNoteAudio
+      summary: Baixa o áudio montado (streaming)
+      responses:
+        "200":
+          description: Áudio
+          content:
+            audio/mp4:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  /ai/notes/{id}/enrich:
+    parameters:
+      - $ref: "#/components/parameters/NoteId"
+    post:
+      tags: [ai]
+      operationId: aiEnrich
+      summary: Enriquece a nota (gera NoteAi)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnrichRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Validation" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  /ai/notes/{id}/chat:
+    parameters:
+      - $ref: "#/components/parameters/NoteId"
+    post:
+      tags: [ai]
+      operationId: aiChat
+      summary: Pergunta no chat da nota
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChatRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Validation" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  /ai/ask:
+    post:
+      tags: [ai]
+      operationId: aiAsk
+      summary: Pergunta sobre toda a base de notas
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AskRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Validation" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  /ai/collections/rule:
+    post:
+      tags: [ai]
+      operationId: aiCollectionRule
+      summary: Gera uma regra de coleção a partir de uma descrição
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Validation" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  /ai/diary/month:
+    post:
+      tags: [ai]
+      operationId: aiDiaryMonth
+      summary: Resumo do mês (YYYY-MM)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DiaryRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Validation" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  /ai/diary/prompt:
+    get:
+      tags: [ai]
+      operationId: aiDailyPrompt
+      summary: Disparador de escrita do dia (assíncrono, 202 + stream)
+      parameters:
+        - name: date
+          in: query
+          required: false
+          description: Dia (YYYY-MM-DD); vazio = hoje
+          schema: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  /ai/streams/{id}:
+    get:
+      tags: [ai]
+      operationId: aiStream
+      summary: Stream SSE do resultado de um pedido de IA
+      description: |
+        Server-Sent Events. Eventos: `status`, `text`, `json` (parciais), `tool`, `ping`
+        (heartbeat a cada 5 s), `done` e `error` (finais). Suporta `Last-Event-ID` para retomar.
+        O resultado estruturado chega pelos eventos `json`; o objeto final também é persistido
+        (e, quando é entidade, volta no próximo pull).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Stream de eventos
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token do realm Keycloak `rbnotes` (audience `rbnotes-api`).
+
+  parameters:
+    NoteId:
+      name: id
+      in: path
+      required: true
+      description: Id da nota (gerado no cliente; alfanumérico, `-` e `_`)
+      schema: { type: string, maxLength: 128 }
+
+  responses:
+    JobAccepted:
+      description: Pedido enfileirado; acompanhe em GET /ai/streams/{id}
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/JobAccepted" }
+    BadRequest:
+      description: Requisição inválida
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unauthorized:
+      description: Token ausente ou inválido
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: Não encontrado
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Validation:
+      description: Falha de validação
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    RateLimited:
+      description: Cota diária de IA atingida
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotImplemented:
+      description: Recurso opcional não configurado no deployment
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    Status:
+      type: object
+      properties:
+        status: { type: string }
+        reason: { type: string }
+    User:
+      type: object
+      required: [id, email, name]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        name: { type: string }
+    Segment:
+      type: object
+      required: [index, speaker, startMs, endMs, text]
+      properties:
+        index: { type: integer }
+        speaker:
+          type: string
+          description: '"me" | "others" | <nome>'
+        startMs: { type: integer }
+        endMs: { type: integer }
+        text: { type: string }
+    Change:
+      type: object
+      required: [entity, id, updatedAt, deleted, data]
+      properties:
+        entity:
+          type: string
+          enum: [note, segment_set, folder, action, collection, vocabulary, chat_message, note_ai]
+        id: { type: string }
+        updatedAt: { type: string, format: date-time }
+        deleted: { type: boolean }
+        data:
+          type: object
+          additionalProperties: true
+    PushRequest:
+      type: object
+      required: [changes]
+      properties:
+        changes:
+          type: array
+          items: { $ref: "#/components/schemas/Change" }
+    PushResult:
+      type: object
+      required: [applied, conflicts]
+      properties:
+        applied:
+          type: array
+          items: { type: string }
+        conflicts:
+          type: array
+          items: { $ref: "#/components/schemas/Change" }
+    PullResult:
+      type: object
+      required: [changes, cursor]
+      properties:
+        changes:
+          type: array
+          items: { $ref: "#/components/schemas/Change" }
+        cursor: { type: string }
+    JobAccepted:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queued] }
+    EnrichRequest:
+      type: object
+      required: [transcript]
+      properties:
+        transcript:
+          type: array
+          items: { $ref: "#/components/schemas/Segment" }
+        speakers:
+          type: array
+          items: { type: string }
+        folder: { type: string }
+        style: { type: string, enum: [objetivo, detalhado, topicos] }
+        length: { type: string, enum: [curto, medio, longo] }
+        model: { type: string, enum: [sonnet, opus, haiku] }
+        extractTasks: { type: boolean }
+    ChatRequest:
+      type: object
+      required: [message]
+      properties:
+        threadId: { type: string, description: "Opcional; padrão = id da nota" }
+        message: { type: string }
+        transcript:
+          type: array
+          description: "Opcional; ancora as citações (atMs) aos trechos reais"
+          items: { $ref: "#/components/schemas/Segment" }
+        model: { type: string, enum: [sonnet, opus, haiku] }
+    AskRequest:
+      type: object
+      required: [question]
+      properties:
+        question: { type: string }
+        model: { type: string, enum: [sonnet, opus, haiku] }
+    RuleRequest:
+      type: object
+      required: [description]
+      properties:
+        description: { type: string }
+        model: { type: string, enum: [sonnet, opus, haiku] }
+    DiaryRequest:
+      type: object
+      required: [month]
+      properties:
+        month: { type: string, description: "YYYY-MM" }
+        model: { type: string, enum: [sonnet, opus, haiku] }
+    NoteAi:
+      type: object
+      required: [title, tldr, points, quote, actions, decisions, questions, speakerNames]
+      properties:
+        title: { type: string }
+        tldr: { type: string }
+        points:
+          type: array
+          items: { type: string }
+        quote:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/Quote"
+        actions:
+          type: array
+          items: { $ref: "#/components/schemas/ActionItem" }
+        decisions:
+          type: array
+          items: { type: string }
+        questions:
+          type: array
+          items: { type: string }
+        speakerNames: { $ref: "#/components/schemas/SpeakerNames" }
+    Quote:
+      type: object
+      required: [segmentIndex, text, speaker, atMs]
+      properties:
+        segmentIndex: { type: integer }
+        text: { type: string }
+        speaker: { type: string }
+        atMs: { type: integer }
+    ActionItem:
+      type: object
+      required: [text, owner, due]
+      properties:
+        text: { type: string }
+        owner: { type: string }
+        due:
+          oneOf:
+            - type: "null"
+            - type: string
+              description: "YYYY-MM-DD"
+    SpeakerNames:
+      type: object
+      required: [others, segments]
+      properties:
+        others:
+          type: array
+          items: { type: string }
+        segments:
+          type: array
+          items:
+            type: object
+            required: [index, speaker, inferred]
+            properties:
+              index: { type: integer }
+              speaker: { type: string }
+              inferred: { type: boolean }
+    ChatAnswer:
+      type: object
+      required: [text, cites]
+      properties:
+        text: { type: string }
+        cites:
+          type: array
+          items:
+            type: object
+            required: [atMs]
+            properties:
+              atMs: { type: integer }
+    AskAnswer:
+      type: object
+      required: [text, sources]
+      properties:
+        text: { type: string }
+        sources:
+          type: array
+          items:
+            type: object
+            required: [noteId, title]
+            properties:
+              noteId: { type: string }
+              title: { type: string }
+    Problem:
+      type: object
+      description: RFC 7807 (application/problem+json)
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        trace_id: { type: string }
+        code: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              code: { type: string }
