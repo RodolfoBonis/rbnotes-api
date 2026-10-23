@@ -48,7 +48,22 @@ var (
 		Name: "jobs_queue",
 		Help: "Jobs na fila por tipo e status (queued|running|dead).",
 	}, []string{"kind", "status"})
+
+	// dependencyUp sinaliza a disponibilidade das dependências externas opcionais (1 = ok, 0 = fora).
+	dependencyUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rbnotes_dependency_up",
+		Help: "1 se a dependência externa está disponível, 0 caso contrário.",
+	}, []string{"dep"})
 	stateOnce sync.Once
+)
+
+// Kinds de job de IA e resultados, usados para pré-inicializar os labels das métricas (aparecem com
+// 0 antes do primeiro evento, para alertas de ausência funcionarem).
+var (
+	aiKinds    = []string{"note_enrich", "note_chat", "ask", "collection_rule", "diary_month", "daily_prompt"}
+	aiResults  = []string{"ok", "error", "rate_limited"}
+	jobResults = []string{"ok", "retry", "dead", "rate_limited", "interrupted"}
+	deps       = []string{"redis", "minio"}
 )
 
 func init() {
@@ -56,7 +71,30 @@ func init() {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
-	registry.MustRegister(jobsProcessed, aiJobs, httpRequests, httpDuration)
+	registry.MustRegister(jobsProcessed, aiJobs, httpRequests, httpDuration, dependencyUp)
+
+	// Pré-inicialização dos labels: cada série nasce em 0, para um alerta de "métrica ausente" (ver
+	// RbNotesApiMetricsMissing) distinguir "sem tráfego" de "processo morto".
+	for _, k := range aiKinds {
+		for _, r := range aiResults {
+			aiJobs.WithLabelValues(k, r)
+		}
+		for _, r := range jobResults {
+			jobsProcessed.WithLabelValues("ai_job", r)
+		}
+	}
+	for _, d := range deps {
+		dependencyUp.WithLabelValues(d).Set(1)
+	}
+}
+
+// SetDependencyUp marca uma dependência externa (redis|minio) como disponível ou não.
+func SetDependencyUp(dep string, up bool) {
+	v := 0.0
+	if up {
+		v = 1
+	}
+	dependencyUp.WithLabelValues(dep).Set(v)
 }
 
 // JobProcessed registra o resultado do processamento de um job.

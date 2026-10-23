@@ -85,8 +85,10 @@ func run() error {
 	if rerr != nil {
 		logger.Warn("redis indisponível; IA desligada", slog.String("err", rerr.Error()))
 		rdb = nil
+		metrics.SetDependencyUp("redis", false)
 	} else {
 		defer func() { _ = rdb.Close() }()
+		metrics.SetDependencyUp("redis", true)
 		aiSvc = ai.New(ai.Deps{Queries: queries, Pool: pool, Queue: jobs, Redis: rdb, Model: cfg.AI.Model, DailyLimit: cfg.AI.DailyLimit, Logger: logger})
 	}
 
@@ -96,6 +98,9 @@ func run() error {
 	if aerr != nil {
 		logger.Warn("minio indisponível; áudio desligado", slog.String("err", aerr.Error()))
 		audioSvc = nil
+		metrics.SetDependencyUp("minio", false)
+	} else {
+		metrics.SetDependencyUp("minio", true)
 	}
 
 	handlers := api.NewHandlers(api.HandlerDeps{
