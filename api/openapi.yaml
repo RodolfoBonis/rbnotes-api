@@ -128,8 +128,14 @@ paths:
       operationId: putNoteAudio
       summary: Envia um chunk do áudio (multipart S3)
       description: |
-        Cada requisição envia uma parte (`part` de 1 a `total`) como `application/octet-stream`.
-        Quando a última parte chega, o objeto é finalizado. Chunk ≤ 50 MB.
+        Cada requisição envia uma parte (`part` de 1 a `total`) como `application/octet-stream`
+        (ou um tipo `audio/*`). Quando a última parte chega, o objeto é finalizado.
+
+        Limites de chunk: **16 MiB** (padrão e máximo). Toda parte NÃO final precisa ter **≥ 5 MiB**
+        (exigência do multipart S3); só a última pode ser menor. O `Content-Length` é obrigatório
+        (o corpo é transmitido direto ao storage). O áudio completo não pode passar de `AUDIO_MAX_BYTES`
+        (default 2 GiB). `total` precisa ser igual ao do upload em andamento e `part ≤ total`. Reenviar
+        a última parte depois de concluído é sucesso idempotente.
       parameters:
         - name: part
           in: query
@@ -137,6 +143,10 @@ paths:
           schema: { type: integer, minimum: 1 }
         - name: total
           in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: Content-Length
+          in: header
           required: true
           schema: { type: integer, minimum: 1 }
       requestBody:
@@ -158,7 +168,26 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409":
-          description: Upload não iniciado (envie a parte 1 primeiro)
+          description: |
+            Conflito: upload não iniciado (`audio_no_upload`), `total` diferente do upload em
+            andamento (`audio_total_mismatch`) ou parte recebida após a conclusão (`audio_completed`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "411":
+          description: Content-Length obrigatório ausente
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "413":
+          description: Chunk acima de 16 MiB ou áudio acima de AUDIO_MAX_BYTES
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "422":
+          description: |
+            Parte não final menor que 5 MiB (`audio_part_too_small`) ou Content-Type fora da
+            allowlist `audio/*` (`audio_bad_content_type`).
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -166,16 +195,40 @@ paths:
     get:
       tags: [audio]
       operationId: getNoteAudio
-      summary: Baixa o áudio montado (streaming)
+      summary: Baixa o áudio montado (streaming, com suporte a Range)
+      description: |
+        Serve o áudio por streaming. Aceita o header `Range` (`bytes=início-fim`) devolvendo `206`
+        com `Content-Range`; sem Range devolve `200`. O `Content-Type` é sempre `audio/mp4` ou o tipo
+        `audio/*` validado no upload. `Accept-Ranges: bytes` está sempre presente.
+      parameters:
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string }
       responses:
         "200":
-          description: Áudio
+          description: Áudio completo
+          headers:
+            Accept-Ranges: { schema: { type: string } }
+          content:
+            audio/mp4:
+              schema: { type: string, format: binary }
+        "206":
+          description: Intervalo do áudio (resposta a um Range)
+          headers:
+            Accept-Ranges: { schema: { type: string } }
+            Content-Range: { schema: { type: string } }
           content:
             audio/mp4:
               schema: { type: string, format: binary }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "416":
+          description: Range não satisfazível
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
         "501": { $ref: "#/components/responses/NotImplemented" }
 
   /ai/notes/{id}/enrich:
