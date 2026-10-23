@@ -26,7 +26,7 @@ func (s *Service) handleEnrich(ctx context.Context, aj dbgen.AiJob, pub *stream.
 	}
 	req := claude.Request{Prompt: enrichPrompt(in), JSONSchema: NoteEnrichSchema, Workdir: s.dir("enrich")}
 	content, err := s.run(ctx, aj, pub, req, func(raw []byte) ([]byte, error) {
-		return ValidateNoteAi(raw, len(in.Transcript))
+		return ValidateNoteAi(raw, in.Transcript)
 	})
 	if err != nil || content == nil {
 		return err

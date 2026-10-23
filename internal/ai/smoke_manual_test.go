@@ -40,7 +40,7 @@ func TestRealEnrich(t *testing.T) {
 	if err != nil || res.Err != "" {
 		t.Fatalf("err=%v res.Err=%s", err, res.Err)
 	}
-	out, verr := ValidateNoteAi(res.Structured, len(in.Transcript))
+	out, verr := ValidateNoteAi(res.Structured, in.Transcript)
 	if verr != nil {
 		t.Fatalf("validação: %v\n%s", verr, res.Structured)
 	}
@@ -82,7 +82,7 @@ func TestRealEnrichMaliciousTranscript(t *testing.T) {
 	if tools != 0 {
 		t.Fatalf("esperava nenhum tool_use além da StructuredOutput, vi %d", tools)
 	}
-	if _, verr := ValidateNoteAi(res.Structured, len(in.Transcript)); verr != nil {
+	if _, verr := ValidateNoteAi(res.Structured, in.Transcript); verr != nil {
 		t.Fatalf("saída inválida: %v\n%s", verr, res.Structured)
 	}
 }

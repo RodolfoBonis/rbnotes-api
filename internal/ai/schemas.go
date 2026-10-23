@@ -110,9 +110,11 @@ var NoteEnrichSchema = compact(`{
       },"description":"Nomes dos outros falantes (além de \"me\"), inferidos do contexto."}
   }}`)
 
-// ValidateNoteAi valida e normaliza o JSON do enrich contra o schema e a transcrição (nSegments =
-// número de segmentos da nota; índices fora da faixa são rejeitados).
-func ValidateNoteAi(raw []byte, nSegments int) ([]byte, error) {
+// ValidateNoteAi valida e normaliza o JSON do enrich contra o schema e a transcrição. A citação é
+// ANCORADA no segmento real: atMs/speaker são sobrescritos pelo segmento do índice e o texto citado
+// precisa estar contido no texto do segmento (normalizado); caso contrário a citação é removida
+// (o modelo não pode inventar um trecho).
+func ValidateNoteAi(raw []byte, segs []Segment) ([]byte, error) {
 	var n NoteAi
 	if err := strictDecode(raw, &n); err != nil {
 		return nil, err
@@ -120,11 +122,20 @@ func ValidateNoteAi(raw []byte, nSegments int) ([]byte, error) {
 	if strings.TrimSpace(n.Title) == "" || strings.TrimSpace(n.Tldr) == "" {
 		return nil, fmt.Errorf("%w: title e tldr são obrigatórios", ErrInvalidOutput)
 	}
+	nSegments := len(segs)
 	if n.Quote != nil {
 		if err := checkIndex(n.Quote.SegmentIndex, nSegments, "quote.segmentIndex"); err != nil {
 			return nil, err
 		}
-		if n.Quote.AtMs < 0 {
+		if nSegments > 0 {
+			seg := segs[n.Quote.SegmentIndex]
+			if quoteMatches(n.Quote.Text, seg.Text) {
+				n.Quote.AtMs = seg.StartMs
+				n.Quote.Speaker = speakerLabel(seg.Speaker)
+			} else {
+				n.Quote = nil // trecho não confere com o segmento: não cita.
+			}
+		} else if n.Quote.AtMs < 0 {
 			return nil, fmt.Errorf("%w: quote.atMs negativo", ErrInvalidOutput)
 		}
 	}
@@ -173,8 +184,8 @@ var NoteChatSchema = compact(`{
       "description":"Citações por tempo; apenas de trechos que existem na transcrição."}
   }}`)
 
-// ValidateChat valida a resposta do chat. Quando allowed não é vazio, só mantém citações cujo atMs
-// pertence a um startMs real de segmento (ancoragem das citações); vazio = não filtra.
+// ValidateChat valida a resposta do chat. Só mantém citações cujo atMs pertence a um startMs real
+// de segmento (ancoragem); com allowed vazio (chat sem transcrição) todas as citações são descartadas.
 func ValidateChat(raw []byte, allowed map[int64]bool) ([]byte, error) {
 	var a ChatAnswer
 	if err := strictDecode(raw, &a); err != nil {
@@ -184,15 +195,15 @@ func ValidateChat(raw []byte, allowed map[int64]bool) ([]byte, error) {
 		return nil, fmt.Errorf("%w: resposta vazia", ErrInvalidOutput)
 	}
 	a.Text = capRunes(a.Text, maxTextLen)
-	if len(allowed) > 0 {
-		kept := make([]Cite, 0, len(a.Cites))
-		for _, c := range a.Cites {
-			if allowed[c.AtMs] {
-				kept = append(kept, c)
-			}
+	// Só mantém citações ancoradas num startMs real. Sem transcrição (allowed vazio), descarta TODAS
+	// (o modelo não pode citar trechos que o servidor não consegue verificar).
+	kept := make([]Cite, 0, len(a.Cites))
+	for _, c := range a.Cites {
+		if allowed[c.AtMs] {
+			kept = append(kept, c)
 		}
-		a.Cites = kept
 	}
+	a.Cites = kept
 	if a.Cites == nil {
 		a.Cites = []Cite{}
 	}
@@ -426,6 +437,21 @@ func clean(in []string) []string {
 		}
 	}
 	return out
+}
+
+// quoteMatches indica se o trecho citado está contido no texto do segmento, comparando de forma
+// normalizada (minúsculas e espaços colapsados). Trecho vazio nunca casa.
+func quoteMatches(quote, segText string) bool {
+	q := normalizeQuote(quote)
+	if q == "" {
+		return false
+	}
+	return strings.Contains(normalizeQuote(segText), q)
+}
+
+// normalizeQuote deixa o texto comparável: minúsculas e espaços colapsados.
+func normalizeQuote(s string) string {
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
 }
 
 func compact(s string) string {
