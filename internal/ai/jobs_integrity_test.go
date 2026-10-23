@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -44,10 +45,9 @@ func TestCheckQuotaAtomicUnderConcurrency(t *testing.T) {
 			defer wg.Done()
 			_, err := svc.RequestAsk(ctx, uid, AskInput{Question: "oi"})
 			mu.Lock()
-			switch {
-			case err == nil:
+			if err == nil {
 				ok++
-			case err == ErrDailyLimit:
+			} else if errors.Is(err, ErrDailyLimit) {
 				limited++
 			}
 			mu.Unlock()

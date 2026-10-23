@@ -44,13 +44,13 @@ func TestSanitizeLine(t *testing.T) {
 	require.NotContains(t, got, ">")
 }
 
-func between(s, open, close string) string {
+func between(s, open, closeTag string) string {
 	i := strings.Index(s, open)
 	if i < 0 {
 		return ""
 	}
 	i += len(open)
-	j := strings.Index(s[i:], close)
+	j := strings.Index(s[i:], closeTag)
 	if j < 0 {
 		return ""
 	}

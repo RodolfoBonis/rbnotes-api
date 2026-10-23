@@ -487,7 +487,6 @@ func (s *Service) closeStream(ctx context.Context, pub *stream.Publisher, typ, d
 	}
 }
 
-
 // forward repassa os eventos da CLI para a stream (saída estruturada → eventos json).
 func forward(ctx context.Context, pub *stream.Publisher) func(claude.Event) {
 	return func(e claude.Event) {

@@ -376,8 +376,8 @@ func parseRange(h string, total int64) (start, end int64, partial bool, err erro
 		return 0, 0, false, ErrBadRange
 	}
 	startStr, endStr := spec[:dash], spec[dash+1:]
-	switch {
-	case startStr == "": // sufixo: últimos N bytes
+	switch startStr {
+	case "": // sufixo: últimos N bytes
 		n, perr := strconv.ParseInt(endStr, 10, 64)
 		if perr != nil || n <= 0 {
 			return 0, 0, false, ErrBadRange

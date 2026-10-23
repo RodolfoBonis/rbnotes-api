@@ -1,12 +1,12 @@
 package ai
 
 import (
-	"strings"
 	"context"
-	"github.com/jackc/pgx/v5/pgtype"
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
 
