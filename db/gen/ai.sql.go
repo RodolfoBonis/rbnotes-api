@@ -210,17 +210,30 @@ func (q *Queries) RecentNotes(ctx context.Context, arg RecentNotesParams) ([]Rec
 }
 
 const searchNotesFTS = `-- name: SearchNotesFTS :many
+WITH ws AS (
+    SELECT websearch_to_tsquery('portuguese', rbnotes_unaccent($3::text)) AS q
+),
+orq AS (
+    SELECT nullif(replace(plainto_tsquery('portuguese', rbnotes_unaccent($3::text))::text, '&', '|'), '')::tsquery AS q
+),
+eff AS (
+    SELECT CASE
+        WHEN EXISTS (SELECT 1 FROM note_search n, ws WHERE n.user_id = $1 AND n.tsv @@ ws.q)
+        THEN (SELECT q FROM ws)
+        ELSE (SELECT q FROM orq)
+    END AS q
+)
 SELECT note_id, title, tldr
-FROM note_search, plainto_tsquery('portuguese', rbnotes_unaccent($1::text)) AS query
-WHERE user_id = $2 AND tsv @@ query
-ORDER BY ts_rank(tsv, query) DESC, updated_at DESC
-LIMIT $3::int
+FROM note_search, eff
+WHERE note_search.user_id = $1 AND note_search.tsv @@ eff.q
+ORDER BY ts_rank(note_search.tsv, eff.q) DESC, updated_at DESC
+LIMIT $2::int
 `
 
 type SearchNotesFTSParams struct {
-	Q   string
 	Uid pgtype.UUID
 	Lim int32
+	Q   string
 }
 
 type SearchNotesFTSRow struct {
@@ -229,9 +242,12 @@ type SearchNotesFTSRow struct {
 	Tldr   string
 }
 
-// SearchNotesFTS: candidatas por relevância (FTS pt-BR com unaccent) e recência.
+// SearchNotesFTS: candidatas por relevância para o `ask`. Usa websearch_to_tsquery (entende
+// pergunta em linguagem natural, aspas e OR) sobre o texto sem acento; se nenhuma nota casar com a
+// consulta "E" (todos os termos), cai para o "OU" dos lexemas (qualquer termo), para uma pergunta
+// de vários termos ainda encontrar notas parcialmente relevantes.
 func (q *Queries) SearchNotesFTS(ctx context.Context, arg SearchNotesFTSParams) ([]SearchNotesFTSRow, error) {
-	rows, err := q.db.Query(ctx, searchNotesFTS, arg.Q, arg.Uid, arg.Lim)
+	rows, err := q.db.Query(ctx, searchNotesFTS, arg.Uid, arg.Lim, arg.Q)
 	if err != nil {
 		return nil, err
 	}
