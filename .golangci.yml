@@ -1,0 +1,30 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - revive
+    - unconvert
+    - whitespace
+
+  exclusions:
+    rules:
+      # Geradores produzem código que não precisa passar pelo linter
+      - path: db/gen/
+        linters:
+          - all
+      # Testes podem ser mais relaxados em segurança
+      - path: _test\.go
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
