@@ -94,6 +94,7 @@ type Deps struct {
 	Model      string
 	Workdir    string
 	DailyLimit int
+	Retention  time.Duration
 	Logger     *slog.Logger
 }
 
@@ -107,6 +108,7 @@ type Service struct {
 	model      string
 	workdir    string
 	dailyLimit int
+	retention  time.Duration
 	logger     *slog.Logger
 }
 
@@ -116,7 +118,7 @@ func New(d Deps) *Service {
 	if m == "" {
 		m = "sonnet"
 	}
-	return &Service{q: d.Queries, pool: d.Pool, queue: d.Queue, rdb: d.Redis, runner: d.Runner, model: m, workdir: d.Workdir, dailyLimit: d.DailyLimit, logger: d.Logger}
+	return &Service{q: d.Queries, pool: d.Pool, queue: d.Queue, rdb: d.Redis, runner: d.Runner, model: m, workdir: d.Workdir, dailyLimit: d.DailyLimit, retention: d.Retention, logger: d.Logger}
 }
 
 // jobPayload é o payload do job na fila.
@@ -240,30 +242,43 @@ func (s *Service) RequestDailyPrompt(ctx context.Context, userID pgtype.UUID, in
 	return s.request(ctx, userID, KindDailyPrompt, "", "", in.Model, in)
 }
 
-// request valida o modelo, aplica a cota, cria o ai_jobs e enfileira o job.
+// request valida o modelo, aplica a cota, cria o ai_jobs e enfileira o job — tudo numa ÚNICA
+// transação com lock por usuário: a cota é atômica (sem furar o teto sob concorrência) e nunca
+// sobra um ai_job sem job na fila (ou vice-versa) se algo falhar no meio.
 func (s *Service) request(ctx context.Context, userID pgtype.UUID, kind, noteID, threadID, model string, input any) (dbgen.AiJob, error) {
 	m, err := s.pickModel(model)
 	if err != nil {
-		return dbgen.AiJob{}, err
-	}
-	if err := s.checkQuota(ctx, userID, kind); err != nil {
 		return dbgen.AiJob{}, err
 	}
 	inputJSON, err := json.Marshal(input)
 	if err != nil {
 		return dbgen.AiJob{}, fmt.Errorf("ai: serializar input: %w", err)
 	}
-	job, err := s.q.CreateAIJob(ctx, dbgen.CreateAIJobParams{
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbgen.AiJob{}, fmt.Errorf("ai: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	qtx := s.q.WithTx(tx)
+
+	if err := s.checkQuota(ctx, qtx, userID, kind); err != nil {
+		return dbgen.AiJob{}, err
+	}
+	job, err := qtx.CreateAIJob(ctx, dbgen.CreateAIJobParams{
 		UserID: userID, Kind: kind, NoteID: noteID, ThreadID: threadID, Model: m, Input: inputJSON,
 	})
 	if err != nil {
-		return job, fmt.Errorf("ai: criar job: %w", err)
+		return dbgen.AiJob{}, fmt.Errorf("ai: criar job: %w", err)
 	}
 	id := uuidString(job.ID)
-	if _, _, err := s.queue.Enqueue(ctx, queue.EnqueueParams{
+	if _, _, err := s.queue.EnqueueTx(ctx, tx, queue.EnqueueParams{
 		Kind: queueKind, Payload: jobPayload{JobID: id}, DedupeKey: queueKind + ":" + id, MaxAttempts: 5,
 	}); err != nil {
-		return job, fmt.Errorf("ai: enfileirar: %w", err)
+		return dbgen.AiJob{}, fmt.Errorf("ai: enfileirar: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return dbgen.AiJob{}, fmt.Errorf("ai: commit: %w", err)
 	}
 	s.status(ctx, id, "Na fila")
 	return job, nil
@@ -281,10 +296,15 @@ func (s *Service) pickModel(model string) (string, error) {
 	return model, nil
 }
 
-// checkQuota aplica o teto diário e registra o pedido.
-func (s *Service) checkQuota(ctx context.Context, userID pgtype.UUID, kind string) error {
+// checkQuota aplica o teto diário e registra o pedido DENTRO da transação. Toma um advisory lock
+// por usuário primeiro, de modo que a contagem + inserção é atômica entre pedidos concorrentes do
+// mesmo usuário (sem lock, dois pedidos simultâneos poderiam furar o teto).
+func (s *Service) checkQuota(ctx context.Context, qtx *dbgen.Queries, userID pgtype.UUID, kind string) error {
 	if s.dailyLimit > 0 {
-		n, err := s.q.CountAIRequestsSince(ctx, dbgen.CountAIRequestsSinceParams{
+		if err := qtx.LockUserForQuota(ctx, uuidString(userID)); err != nil {
+			return fmt.Errorf("ai: lock cota: %w", err)
+		}
+		n, err := qtx.CountAIRequestsSince(ctx, dbgen.CountAIRequestsSinceParams{
 			UserID: userID, CreatedAt: pgtype.Timestamptz{Time: time.Now().Add(-24 * time.Hour), Valid: true},
 		})
 		if err != nil {
@@ -294,7 +314,7 @@ func (s *Service) checkQuota(ctx context.Context, userID pgtype.UUID, kind strin
 			return ErrDailyLimit
 		}
 	}
-	return s.q.InsertAIRequest(ctx, dbgen.InsertAIRequestParams{UserID: userID, Kind: kind})
+	return qtx.InsertAIRequest(ctx, dbgen.InsertAIRequestParams{UserID: userID, Kind: kind})
 }
 
 // status publica um aviso avulso na stream (ex.: "Na fila"), sem encerrá-la.

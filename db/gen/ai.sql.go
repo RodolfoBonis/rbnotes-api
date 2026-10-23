@@ -11,6 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const clearOldAIJobData = `-- name: ClearOldAIJobData :exec
+UPDATE ai_jobs SET input = '{}'::jsonb, result = NULL
+WHERE updated_at < $1 AND (input <> '{}'::jsonb OR result IS NOT NULL)
+`
+
+// ClearOldAIJobData esvazia o payload/resultado pesado dos ai_jobs antigos, preservando o status.
+func (q *Queries) ClearOldAIJobData(ctx context.Context, updatedAt pgtype.Timestamptz) error {
+	_, err := q.db.Exec(ctx, clearOldAIJobData, updatedAt)
+	return err
+}
+
 const completeAIJob = `-- name: CompleteAIJob :exec
 UPDATE ai_jobs SET status = 'done', result = $2, model = $3, error = '', updated_at = now()
 WHERE id = $1
@@ -101,6 +112,16 @@ func (q *Queries) DeleteNoteSearch(ctx context.Context, arg DeleteNoteSearchPara
 	return err
 }
 
+const deleteOldAIRequests = `-- name: DeleteOldAIRequests :exec
+DELETE FROM ai_requests WHERE created_at < $1
+`
+
+// DeleteOldAIRequests apaga os registros de cota mais antigos que o cutoff (retenção).
+func (q *Queries) DeleteOldAIRequests(ctx context.Context, createdAt pgtype.Timestamptz) error {
+	_, err := q.db.Exec(ctx, deleteOldAIRequests, createdAt)
+	return err
+}
+
 const failAIJob = `-- name: FailAIJob :exec
 UPDATE ai_jobs SET status = 'error', error = $2, updated_at = now() WHERE id = $1
 `
@@ -168,6 +189,53 @@ type InsertAIRequestParams struct {
 func (q *Queries) InsertAIRequest(ctx context.Context, arg InsertAIRequestParams) error {
 	_, err := q.db.Exec(ctx, insertAIRequest, arg.UserID, arg.Kind)
 	return err
+}
+
+const lockUserForQuota = `-- name: LockUserForQuota :exec
+SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
+`
+
+// LockUserForQuota serializa a checagem de cota + criação do job por usuário (advisory lock de
+// transação): dois pedidos simultâneos do mesmo usuário não furam o teto diário.
+func (q *Queries) LockUserForQuota(ctx context.Context, dollar_1 string) error {
+	_, err := q.db.Exec(ctx, lockUserForQuota, dollar_1)
+	return err
+}
+
+const reapStuckAIJobs = `-- name: ReapStuckAIJobs :many
+UPDATE ai_jobs SET status = 'error', error = $2, updated_at = now()
+WHERE status IN ('queued', 'running') AND ai_jobs.updated_at < $1
+  AND NOT EXISTS (
+      SELECT 1 FROM jobs j
+      WHERE j.payload->>'job_id' = ai_jobs.id::text AND j.status IN ('queued', 'running'))
+RETURNING id
+`
+
+type ReapStuckAIJobsParams struct {
+	UpdatedAt pgtype.Timestamptz
+	Error     string
+}
+
+// ReapStuckAIJobs marca como erro os ai_jobs presos (queued/running há mais de $1) que NÃO têm mais
+// um job vivo na fila (worker morreu sem fechar a stream). Devolve os ids para fechar as streams.
+func (q *Queries) ReapStuckAIJobs(ctx context.Context, arg ReapStuckAIJobsParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, reapStuckAIJobs, arg.UpdatedAt, arg.Error)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const recentNotes = `-- name: RecentNotes :many

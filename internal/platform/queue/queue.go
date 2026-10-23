@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // ErrLeaseLost indica que Complete/Fail não afetou o job: ele não está mais 'running' sob o
@@ -118,6 +120,8 @@ type Queue interface {
 	// Enqueue insere um job. Com DedupeKey e um job ativo idêntico existente, devolve
 	// (nil, false, nil) — enfileiramento suprimido, sem erro.
 	Enqueue(ctx context.Context, p EnqueueParams) (job *Job, enqueued bool, err error)
+	// EnqueueTx insere o job na transação dada (atomicidade com outras escritas, ex.: ai_jobs).
+	EnqueueTx(ctx context.Context, tx pgx.Tx, p EnqueueParams) (job *Job, enqueued bool, err error)
 	// Claim reivindica o próximo job elegível (queued ou com lease expirado e tentativas restantes),
 	// marcando-o running com um novo lease + lease_token. Devolve (nil, nil) quando não há job.
 	// kinds restringe aos tipos dados (vazio = qualquer): o worker de sync e o ai-worker dividem a

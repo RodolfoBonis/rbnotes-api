@@ -24,6 +24,30 @@ SELECT count(*) FROM ai_requests WHERE user_id = $1 AND created_at >= $2;
 -- name: InsertAIRequest :exec
 INSERT INTO ai_requests (user_id, kind) VALUES ($1, $2);
 
+-- LockUserForQuota serializa a checagem de cota + criação do job por usuário (advisory lock de
+-- transação): dois pedidos simultâneos do mesmo usuário não furam o teto diário.
+-- name: LockUserForQuota :exec
+SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0));
+
+-- ReapStuckAIJobs marca como erro os ai_jobs presos (queued/running há mais de $1) que NÃO têm mais
+-- um job vivo na fila (worker morreu sem fechar a stream). Devolve os ids para fechar as streams.
+-- name: ReapStuckAIJobs :many
+UPDATE ai_jobs SET status = 'error', error = $2, updated_at = now()
+WHERE status IN ('queued', 'running') AND ai_jobs.updated_at < $1
+  AND NOT EXISTS (
+      SELECT 1 FROM jobs j
+      WHERE j.payload->>'job_id' = ai_jobs.id::text AND j.status IN ('queued', 'running'))
+RETURNING id;
+
+-- DeleteOldAIRequests apaga os registros de cota mais antigos que o cutoff (retenção).
+-- name: DeleteOldAIRequests :exec
+DELETE FROM ai_requests WHERE created_at < $1;
+
+-- ClearOldAIJobData esvazia o payload/resultado pesado dos ai_jobs antigos, preservando o status.
+-- name: ClearOldAIJobData :exec
+UPDATE ai_jobs SET input = '{}'::jsonb, result = NULL
+WHERE updated_at < $1 AND (input <> '{}'::jsonb OR result IS NOT NULL);
+
 -- ── chat threads (--resume) ─────────────────────────────────────────────────────────────
 -- name: GetThreadSession :one
 SELECT claude_session_id FROM chat_threads WHERE user_id = $1 AND thread_id = $2;

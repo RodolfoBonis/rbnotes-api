@@ -34,8 +34,23 @@ const (
 // returningCols são as colunas devolvidas pelo Enqueue/Claim (lease_token como texto para scan).
 const returningCols = `id, kind, payload, status, run_at, attempts, max_attempts, last_error, COALESCE(lease_token::text, '')`
 
+// rowQuerier é o mínimo que o Enqueue precisa (pool OU transação), para enfileirar dentro de uma
+// transação externa (ex.: criar o ai_job e o job na MESMA transação).
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // Enqueue insere um job, respeitando o dedupe via ON CONFLICT no índice parcial único.
 func (q *PostgresQueue) Enqueue(ctx context.Context, p EnqueueParams) (*Job, bool, error) {
+	return q.enqueue(ctx, q.pool, p)
+}
+
+// EnqueueTx é como Enqueue, mas usa a transação dada (atomicidade com outras escritas).
+func (q *PostgresQueue) EnqueueTx(ctx context.Context, tx pgx.Tx, p EnqueueParams) (*Job, bool, error) {
+	return q.enqueue(ctx, tx, p)
+}
+
+func (q *PostgresQueue) enqueue(ctx context.Context, db rowQuerier, p EnqueueParams) (*Job, bool, error) {
 	payload := []byte("{}")
 	if p.Payload != nil {
 		b, err := json.Marshal(p.Payload)
@@ -65,7 +80,7 @@ ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL AND status IN ('queued','r
 DO NOTHING
 RETURNING ` + returningCols
 
-	row := q.pool.QueryRow(ctx, stmt, p.Kind, payload, runAt, maxAttempts, dedupe)
+	row := db.QueryRow(ctx, stmt, p.Kind, payload, runAt, maxAttempts, dedupe)
 	job, err := scanJob(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Conflito de dedupe: já há um job ativo idêntico.

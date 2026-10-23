@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/RodolfoBonis/rbnotes-api/internal/platform/queue"
 )
 
@@ -46,6 +48,9 @@ type fakeQueue struct {
 }
 
 func (q *fakeQueue) Enqueue(context.Context, queue.EnqueueParams) (*queue.Job, bool, error) {
+	return nil, false, nil
+}
+func (q *fakeQueue) EnqueueTx(context.Context, pgx.Tx, queue.EnqueueParams) (*queue.Job, bool, error) {
 	return nil, false, nil
 }
 func (q *fakeQueue) Claim(context.Context, time.Duration, ...string) (*queue.Job, error) {

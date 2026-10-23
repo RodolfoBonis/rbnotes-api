@@ -28,7 +28,10 @@ import (
 	"github.com/RodolfoBonis/rbnotes-api/internal/platform/telemetry"
 )
 
-const stateInterval = time.Minute
+const (
+	stateInterval       = time.Minute
+	maintenanceInterval = 5 * time.Minute
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -62,16 +65,18 @@ func run() error {
 	// Redis é obrigatório aqui: é o canal da resposta em tempo real.
 	rdb, err := redisplat.New(ctx, cfg.Redis)
 	if err != nil {
+		metrics.SetDependencyUp("redis", false)
 		return err
 	}
 	defer func() { _ = rdb.Close() }()
+	metrics.SetDependencyUp("redis", true)
 
 	queries := dbgen.New(pool)
 	jobs := queue.NewPostgres(pool, queue.DefaultBackoff)
 	svc := ai.New(ai.Deps{
 		Queries: queries, Pool: pool, Queue: jobs, Redis: rdb,
 		Runner: claude.New(cfg.AI.ClaudeBin, cfg.AI.OAuthToken, cfg.AI.Home, logger),
-		Model:  cfg.AI.Model, Workdir: cfg.AI.Workdir, DailyLimit: cfg.AI.DailyLimit, Logger: logger,
+		Model:  cfg.AI.Model, Workdir: cfg.AI.Workdir, DailyLimit: cfg.AI.DailyLimit, Retention: cfg.AI.Retention, Logger: logger,
 	})
 	worker := ai.NewWorker(svc, jobs, cfg.AI.JobTimeout, logger)
 
@@ -85,6 +90,11 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		publishState(ctx, queries, logger)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		svc.RunMaintenance(ctx, maintenanceInterval)
 	}()
 
 	mux := http.NewServeMux()

@@ -148,6 +148,9 @@ type AI struct {
 	Home string `env:"AI_HOME" envDefault:"/home/node"`
 	// Workdir é a raiz dos cwd da CLI (um por conversa: o --resume exige o mesmo cwd).
 	Workdir string `env:"AI_WORKDIR" envDefault:"/home/node/work"`
+	// Retention é por quanto tempo guardar ai_requests e o input/result dos ai_jobs, e os jobs
+	// terminais da fila, antes de o housekeeping limpá-los. Default 30 dias.
+	Retention time.Duration `env:"AI_RETENTION" envDefault:"720h"`
 }
 
 // AllowedModels é a whitelist de modelos aceitos nos pedidos de IA (alias curtos da CLI).
