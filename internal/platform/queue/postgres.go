@@ -231,6 +231,27 @@ func (q *PostgresQueue) Retry(ctx context.Context, id string) error {
 	return nil
 }
 
+// Requeue reagenda o job para runAt devolvendo a tentativa gasta no claim (GREATEST(attempts-1,0)):
+// um limite externo (cota) não deve empurrar o job para 'dead'. Exige o lease_token.
+func (q *PostgresQueue) Requeue(ctx context.Context, id, leaseToken string, runAt time.Time, cause error) error {
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+	}
+	tag, err := q.pool.Exec(ctx,
+		`UPDATE jobs SET status='queued', run_at=$3, attempts=GREATEST(attempts-1, 0),
+                locked_until=NULL, last_error=$4, updated_at=now()
+         WHERE id=$1 AND status='running' AND lease_token=$2`,
+		id, leaseToken, runAt, truncateRunes(msg, maxErrorLen))
+	if err != nil {
+		return fmt.Errorf("requeue job: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }

@@ -40,6 +40,8 @@ type fakeQueue struct {
 	mu         sync.Mutex
 	completed  int
 	failed     int
+	requeued   int
+	requeuedAt time.Time
 	failCauses []error
 }
 
@@ -66,6 +68,13 @@ func (q *fakeQueue) Cleanup(context.Context, time.Duration, time.Duration) (int6
 	return 0, nil
 }
 func (q *fakeQueue) Retry(context.Context, string) error { return nil }
+func (q *fakeQueue) Requeue(_ context.Context, _, _ string, runAt time.Time, _ error) error {
+	q.mu.Lock()
+	q.requeued++
+	q.requeuedAt = runAt
+	q.mu.Unlock()
+	return nil
+}
 
 func newTestWorker(h handler, q queue.Queue, jobTimeout, grace time.Duration) *Worker {
 	return &Worker{svc: h, queue: q, jobTimeout: jobTimeout, shutdownGrace: grace,
@@ -138,4 +147,20 @@ func TestWorkerProcessTransientExhausted(t *testing.T) {
 	require.Equal(t, 1, q.failed)
 	require.False(t, queue.IsPermanent(q.failCauses[0]))
 	require.Equal(t, 1, h.gaveUp)
+}
+
+// TestWorkerProcessRateLimitRequeues: um limite de uso reagenda o job SEM gastar tentativa.
+func TestWorkerProcessRateLimitRequeues(t *testing.T) {
+	at := time.Now().Add(30 * time.Minute)
+	h := &fakeHandler{fn: func(context.Context, queue.Job) error {
+		return queue.RetryAfter(errors.New("ai: limite de uso"), at)
+	}}
+	q := &fakeQueue{}
+	w := newTestWorker(h, q, time.Second, time.Second)
+	w.process(context.Background(), queue.Job{ID: "j6", Attempts: 5, MaxAttempts: 5})
+	require.Equal(t, 1, q.requeued)
+	require.Equal(t, 0, q.failed, "limite de uso não vira falha/dead")
+	require.Equal(t, 0, q.completed)
+	require.Equal(t, 0, h.gaveUp)
+	require.WithinDuration(t, at, q.requeuedAt, time.Second)
 }

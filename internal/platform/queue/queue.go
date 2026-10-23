@@ -59,6 +59,33 @@ func IsPermanent(err error) bool {
 	return errors.As(err, &pe)
 }
 
+// retryAfterError sinaliza que o job deve ser reagendado para um instante específico SEM gastar uma
+// tentativa (limite externo, ex.: cota da IA, que não é culpa do job).
+type retryAfterError struct {
+	err error
+	at  time.Time
+}
+
+func (e *retryAfterError) Error() string { return e.err.Error() }
+func (e *retryAfterError) Unwrap() error { return e.err }
+
+// RetryAfter marca um erro para reagendamento em at sem consumir tentativa (ver Requeue).
+func RetryAfter(err error, at time.Time) error {
+	if err == nil {
+		return nil
+	}
+	return &retryAfterError{err: err, at: at}
+}
+
+// RetryAfterTime extrai o instante de reagendamento de um erro marcado com RetryAfter.
+func RetryAfterTime(err error) (time.Time, bool) {
+	var e *retryAfterError
+	if errors.As(err, &e) {
+		return e.at, true
+	}
+	return time.Time{}, false
+}
+
 // Job é uma unidade de trabalho persistida.
 type Job struct {
 	ID          string
@@ -106,6 +133,9 @@ type Queue interface {
 	Cleanup(ctx context.Context, doneAge, deadAge time.Duration) (int64, error)
 	// Retry devolve um job dead para a fila; ErrNotRetryable se não existir ou não estiver dead.
 	Retry(ctx context.Context, id string) error
+	// Requeue reagenda o job para runAt SEM consumir uma tentativa (devolve o attempt gasto no
+	// claim). Para limites externos (ex.: cota da IA). Exige o lease_token — 0 linhas → ErrLeaseLost.
+	Requeue(ctx context.Context, id, leaseToken string, runAt time.Time, cause error) error
 }
 
 // BackoffConfig parametriza o backoff exponencial com jitter.

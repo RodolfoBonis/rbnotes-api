@@ -32,8 +32,10 @@ desktop ──HTTPS──> api (cmd/api)            ──> Postgres (sync, fila
 - **`cmd/ai-worker`** — consome os jobs `ai_job` (um por vez), roda a CLI do Claude Code headless e
   transmite a resposta por Redis Streams. Imagem própria (`node:22-slim` + `@anthropic-ai/claude-code`).
 - **Fila** (`internal/platform/queue`) — Postgres com `FOR UPDATE SKIP LOCKED`, lease + lease_token,
-  dedupe, backoff com jitter. Rate limit da assinatura = **retry**; timeout de 6 min → permanente;
-  tentativas esgotadas por erro transitório fecham a stream com erro (`giveUp`).
+  dedupe, backoff com jitter. Rate limit da assinatura = **reagendado** (`Requeue`) para o reset
+  informado pela CLI, ou +30 min, **sem consumir tentativa** (a métrica/SSE avisam a nova tentativa);
+  timeout de 6 min → permanente; tentativas esgotadas por erro transitório fecham a stream (`giveUp`).
+  SIGTERM durante um job não o marca como falho: o lease expira e ele é retomado após o deploy.
 - **IA** (`internal/ai`) — toda saída é **estruturada** (JSON Schema para a CLI) e **revalidada**
   no Go (DisallowUnknownFields, required, ranges) antes de persistir. Schemas em `schemas.go`.
 - **Sync** (`internal/sync`) — tabelas por entidade (`notes`, `segment_sets`, `folders`, `actions`,

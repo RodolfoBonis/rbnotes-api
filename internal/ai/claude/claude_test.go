@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"strconv"
 	"context"
 	"encoding/json"
 	"io"
@@ -144,4 +145,12 @@ echo '{"type":"result","is_error":false,"result":"eco: '"$prompt"'","session_id"
 
 	_, err = New(filepath.Join(t.TempDir(), "nao-existe"), "tok", "", logger).Run(context.Background(), Request{Workdir: t.TempDir()}, nil)
 	require.Error(t, err, "binário ausente é falha de infra")
+}
+
+func TestParseResetUnix(t *testing.T) {
+	future := time.Now().Add(time.Hour).Unix()
+	got := parseResetUnix("Claude AI usage limit reached|" + strconv.FormatInt(future, 10))
+	require.Equal(t, future, got.Unix())
+	require.True(t, parseResetUnix("sem reset").IsZero())
+	require.True(t, parseResetUnix("limit|100").IsZero(), "reset no passado é ignorado")
 }

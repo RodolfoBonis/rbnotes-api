@@ -14,7 +14,6 @@ import (
 	dbgen "github.com/RodolfoBonis/rbnotes-api/db/gen"
 	"github.com/RodolfoBonis/rbnotes-api/internal/ai/claude"
 	"github.com/RodolfoBonis/rbnotes-api/internal/ai/stream"
-	"github.com/RodolfoBonis/rbnotes-api/internal/platform/metrics"
 )
 
 // handleEnrich gera o NoteAi, persiste como entidade note_ai (sincroniza no próximo pull) e
@@ -203,9 +202,7 @@ func (s *Service) finishRun(ctx context.Context, aj dbgen.AiJob, pub *stream.Pub
 		return nil, runErr
 	}
 	if res.RateLimited {
-		metrics.AIJob(aj.Kind, "rate_limited")
-		s.closeStream(ctx, pub, stream.TypeStatus, "Limite de uso da IA atingido — nova tentativa em breve")
-		return nil, fmt.Errorf("ai: limite de uso")
+		return nil, s.rateLimited(ctx, aj, pub, res)
 	}
 	if res.Err != "" {
 		return nil, s.fail(ctx, aj, pub, res.Err)

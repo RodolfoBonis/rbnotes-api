@@ -114,6 +114,17 @@ func (w *Worker) process(ctx context.Context, job queue.Job) {
 		return
 	}
 
+	// Limite externo (cota da IA): reagenda para o instante informado SEM gastar uma tentativa.
+	if at, ok := queue.RetryAfterTime(err); ok {
+		w.logger.Info("ai: limite de uso; reagendado sem gastar tentativa",
+			slog.String("job_id", job.ID), slog.String("kind", job.Kind), slog.Time("run_at", at))
+		if rerr := w.queue.Requeue(bg, job.ID, job.LeaseToken, at, err); rerr != nil && !errors.Is(rerr, queue.ErrLeaseLost) {
+			w.logger.Error("ai: requeue falhou", slog.String("err", rerr.Error()))
+		}
+		metrics.JobProcessed(job.Kind, "rate_limited")
+		return
+	}
+
 	// Deadline do PRÓPRIO job (não shutdown): falha permanente — não adianta reprocessar. O serviço
 	// já marcou o ai_jobs e fechou a stream com a mensagem ao usuário.
 	if deadline && !queue.IsPermanent(err) {

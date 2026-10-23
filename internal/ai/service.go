@@ -369,9 +369,7 @@ func (s *Service) run(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher
 		return nil, err
 	}
 	if res.RateLimited {
-		metrics.AIJob(aj.Kind, "rate_limited")
-		s.closeStream(ctx, pub, stream.TypeStatus, "Limite de uso da IA atingido — nova tentativa em breve")
-		return nil, errors.New("ai: limite de uso")
+		return nil, s.rateLimited(ctx, aj, pub, res)
 	}
 	if res.Err != "" {
 		return nil, s.fail(ctx, aj, pub, res.Err)
@@ -410,6 +408,21 @@ func (s *Service) done(ctx context.Context, aj dbgen.AiJob, pub *stream.Publishe
 	metrics.AIJob(aj.Kind, "ok")
 	s.closeStream(bg, pub, stream.TypeDone, "")
 	return nil
+}
+
+// rateLimitRequeue é o atraso padrão quando a CLI não informa o instante de reset do limite de uso.
+const rateLimitRequeue = 30 * time.Minute
+
+// rateLimited trata o limite de uso: conta a métrica, avisa a UI com o horário da nova tentativa e
+// devolve um erro RetryAfter para o worker reagendar SEM gastar uma tentativa.
+func (s *Service) rateLimited(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher, res claude.Result) error {
+	metrics.AIJob(aj.Kind, "rate_limited")
+	retryAt := res.RetryAt
+	if retryAt.IsZero() || retryAt.Before(time.Now()) {
+		retryAt = time.Now().Add(rateLimitRequeue)
+	}
+	s.closeStream(ctx, pub, stream.TypeStatus, "Limite de uso da IA atingido — nova tentativa às "+retryAt.Local().Format("15:04"))
+	return queue.RetryAfter(errors.New("ai: limite de uso"), retryAt)
 }
 
 // giveUp encerra o pedido cujas tentativas acabaram por erro transitório (ex.: limite de uso

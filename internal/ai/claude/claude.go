@@ -35,7 +35,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -82,6 +84,8 @@ type Result struct {
 	CostUSD    float64
 	// RateLimited: a assinatura atingiu o limite de uso (reagendar, não é erro do pedido).
 	RateLimited bool
+	// RetryAt, quando não-zero, é o instante de reset informado pela CLI (mensagem "...|<unix>").
+	RetryAt time.Time
 	// NoConversation: a sessão do --resume não existe mais (refazer sem resume).
 	NoConversation bool
 	Err            string
@@ -295,6 +299,7 @@ func parseStream(rd io.Reader, onEvent func(Event)) (Result, bool) {
 			if ln.IsError {
 				if isRateLimit(ln.Result) || isRateLimit(ln.Subtype) {
 					res.RateLimited = true
+					res.RetryAt = parseResetUnix(ln.Result)
 					res.Err = "limite de uso atingido"
 				} else {
 					res.Err = firstNonEmpty(ln.Result, ln.Subtype, "a CLI retornou erro sem mensagem")
@@ -327,6 +332,24 @@ func describeTool(name string, input json.RawMessage) string {
 	default:
 		return ""
 	}
+}
+
+// parseResetUnix extrai o instante de reset do limite de uso de uma mensagem como
+// "Claude AI usage limit reached|1760000000" (unix seconds). Zero se ausente/no passado.
+func parseResetUnix(s string) time.Time {
+	i := strings.LastIndexByte(s, '|')
+	if i < 0 {
+		return time.Time{}
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(s[i+1:]), 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	t := time.Unix(n, 0)
+	if t.Before(time.Now()) {
+		return time.Time{}
+	}
+	return t
 }
 
 func isRateLimit(s string) bool {
