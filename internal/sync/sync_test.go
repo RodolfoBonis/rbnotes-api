@@ -110,3 +110,45 @@ func createUser(t *testing.T, q *dbgen.Queries, sub string) pgtype.UUID {
 	require.NoError(t, err)
 	return u.ID
 }
+
+func TestPushLWWTieBreakAndClockSkew(t *testing.T) {
+	pool := testsupport.NewPostgres(t)
+	q := dbgen.New(pool)
+	svc := syncpkg.New(q, pool)
+	ctx := context.Background()
+	user := createUser(t, q, "sub-tie")
+
+	t1 := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+
+	// Base: conteúdo A em t1.
+	_, err := svc.Push(ctx, user, []syncpkg.Change{{Entity: syncpkg.EntityNote, ID: "n1", UpdatedAt: t1, Data: json.RawMessage(`{"title":"A"}`)}})
+	require.NoError(t, err)
+
+	// Empate (mesmo t1), conteúdo maior "B" → vence o desempate (applied).
+	res, err := svc.Push(ctx, user, []syncpkg.Change{{Entity: syncpkg.EntityNote, ID: "n1", UpdatedAt: t1, Data: json.RawMessage(`{"title":"B"}`)}})
+	require.NoError(t, err)
+	require.Equal(t, []string{"n1"}, res.Applied)
+
+	// Empate com conteúdo menor "A" → perde (conflito, servidor devolve "B").
+	res, err = svc.Push(ctx, user, []syncpkg.Change{{Entity: syncpkg.EntityNote, ID: "n1", UpdatedAt: t1, Data: json.RawMessage(`{"title":"A"}`)}})
+	require.NoError(t, err)
+	require.Empty(t, res.Applied)
+	require.Len(t, res.Conflicts, 1)
+	require.JSONEq(t, `{"title":"B"}`, string(res.Conflicts[0].Data))
+
+	// Empate, conteúdo idêntico "B" → idempotente (applied, sem conflito).
+	res, err = svc.Push(ctx, user, []syncpkg.Change{{Entity: syncpkg.EntityNote, ID: "n1", UpdatedAt: t1, Data: json.RawMessage(`{"title":"B"}`)}})
+	require.NoError(t, err)
+	require.Equal(t, []string{"n1"}, res.Applied)
+	require.Empty(t, res.Conflicts)
+
+	// Clock skew: updatedAt muito no futuro é limitado a ~now, então um push logo depois com now real
+	// consegue vencer (sem o clamp, o futuro venceria para sempre).
+	future := time.Now().Add(24 * time.Hour)
+	_, err = svc.Push(ctx, user, []syncpkg.Change{{Entity: syncpkg.EntityNote, ID: "n2", UpdatedAt: future, Data: json.RawMessage(`{"title":"futuro"}`)}})
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+	res, err = svc.Push(ctx, user, []syncpkg.Change{{Entity: syncpkg.EntityNote, ID: "n2", UpdatedAt: time.Now(), Data: json.RawMessage(`{"title":"agora"}`)}})
+	require.NoError(t, err)
+	require.Equal(t, []string{"n2"}, res.Applied, "o updatedAt futuro foi limitado, então o push atual vence")
+}

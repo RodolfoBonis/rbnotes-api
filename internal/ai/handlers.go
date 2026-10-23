@@ -3,10 +3,12 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	dbgen "github.com/RodolfoBonis/rbnotes-api/db/gen"
@@ -29,6 +31,18 @@ func (s *Service) handleEnrich(ctx context.Context, aj dbgen.AiJob, pub *stream.
 	if err != nil || content == nil {
 		return err
 	}
+	// Nota apagada enquanto o enrich rodava: não reindexa (some da busca/ask) nem mantém a citação.
+	deleted, derr := s.noteDeleted(ctx, aj.UserID, aj.NoteID)
+	if derr != nil {
+		return derr
+	}
+	if deleted {
+		content = stripQuote(content)
+		if err := s.writeEntity(ctx, aj.UserID, "note_ai", aj.NoteID, content); err != nil {
+			return err
+		}
+		return s.done(ctx, aj, pub, content)
+	}
 	if err := s.writeEntity(ctx, aj.UserID, "note_ai", aj.NoteID, content); err != nil {
 		return err
 	}
@@ -36,6 +50,32 @@ func (s *Service) handleEnrich(ctx context.Context, aj dbgen.AiJob, pub *stream.
 		return err
 	}
 	return s.done(ctx, aj, pub, content)
+}
+
+// noteDeleted indica se a nota foi apagada (ou não existe mais) no momento do enrich.
+func (s *Service) noteDeleted(ctx context.Context, userID pgtype.UUID, noteID string) (bool, error) {
+	n, err := s.q.GetNote(ctx, dbgen.GetNoteParams{UserID: userID, ID: noteID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("ai: carregar nota: %w", err)
+	}
+	return n.Deleted, nil
+}
+
+// stripQuote remove a citação do enrich (usado quando a nota foi apagada: não citar trechos).
+func stripQuote(content []byte) []byte {
+	var n NoteAi
+	if json.Unmarshal(content, &n) != nil {
+		return content
+	}
+	n.Quote = nil
+	out, err := json.Marshal(n)
+	if err != nil {
+		return content
+	}
+	return out
 }
 
 // handleChat responde ao chat (com --resume por thread) e persiste a resposta como chat_message.

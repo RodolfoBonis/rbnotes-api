@@ -8,10 +8,12 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -45,6 +47,10 @@ const MaxPushChanges = 1000
 
 // pullPageSize é o teto de mudanças por página do pull (o cliente pagina pelo cursor).
 const pullPageSize = 500
+
+// maxClockSkew limita o quanto o updatedAt do cliente pode estar no futuro: um relógio adiantado
+// não pode "vencer" o LWW para sempre. Acima disso, o updatedAt é fixado em now() (com log).
+const maxClockSkew = 5 * time.Minute
 
 // ErrTooManyChanges indica um push acima de MaxPushChanges.
 var ErrTooManyChanges = fmt.Errorf("sync: push com mais de %d mudanças", MaxPushChanges)
@@ -115,24 +121,44 @@ func (s *Service) Push(ctx context.Context, userID pgtype.UUID, changes []Change
 		if ch.ID == "" || len(ch.ID) > maxEntityIDLen {
 			return res, fmt.Errorf("%w: %q", ErrInvalidID, ch.ID)
 		}
+		// Relógio do cliente adiantado demais: limita o updatedAt a now()+skew para não vencer o
+		// LWW para sempre.
+		if ch.UpdatedAt.After(time.Now().Add(maxClockSkew)) {
+			slog.WarnContext(ctx, "sync: updatedAt no futuro, limitado a now()",
+				slog.String("entity", ch.Entity), slog.String("id", ch.ID),
+				slog.Time("updated_at", ch.UpdatedAt))
+			ch.UpdatedAt = time.Now()
+		}
 		server, found, err := getEntity(ctx, q, ch.Entity, userID, ch.ID)
 		if err != nil {
 			return res, err
 		}
 		if found {
 			serverTime := server.UpdatedAt.Time
+			cData, sData := rawOrEmpty(ch.Data), rawOrEmpty(server.Data)
 			switch {
 			case ch.UpdatedAt.Before(serverTime):
 				// O servidor tem uma versão mais nova: conflito, devolve a do servidor.
 				res.Conflicts = append(res.Conflicts, Change{
 					Entity: ch.Entity, ID: ch.ID, UpdatedAt: serverTime,
-					Deleted: server.Deleted, Data: rawOrEmpty(server.Data),
+					Deleted: server.Deleted, Data: sData,
 				})
 				continue
 			case ch.UpdatedAt.Equal(serverTime):
-				// Idempotente: já temos esta versão.
-				res.Applied = append(res.Applied, ch.ID)
-				continue
+				// Empate de timestamp: idempotente se o conteúdo é igual; senão desempata pelo
+				// conteúdo (comparação determinística e simétrica entre dispositivos).
+				if ch.Deleted == server.Deleted && bytes.Equal(cData, sData) {
+					res.Applied = append(res.Applied, ch.ID)
+					continue
+				}
+				if bytes.Compare(cData, sData) <= 0 {
+					res.Conflicts = append(res.Conflicts, Change{
+						Entity: ch.Entity, ID: ch.ID, UpdatedAt: serverTime,
+						Deleted: server.Deleted, Data: sData,
+					})
+					continue
+				}
+				// Incoming vence o desempate: segue para o upsert abaixo.
 			}
 		}
 		seq, err := q.NextChangeSeq(ctx, userID)
