@@ -193,3 +193,68 @@ func TestDevMode(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, code)
 	assert.Nil(t, seen)
 }
+
+func newAllowlistOIDC(t *testing.T, fi *fakeIssuer, emails ...string) *Authenticator {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	a := New(ctx, config.Auth{Mode: config.AuthModeOIDC, Issuer: fi.srv.URL, Audience: testAudience,
+		RequiredRole: testRole, AllowedEmails: emails}, nil)
+	require.Eventually(t, a.Ready, 5*time.Second, 10*time.Millisecond, "provider oidc não carregou")
+	return a
+}
+
+func TestAllowlist(t *testing.T) {
+	fi := newFakeIssuer(t)
+	a := newAllowlistOIDC(t, fi, "eu@rb.lab")
+
+	tests := []struct {
+		name     string
+		override map[string]any
+		want     int
+	}{
+		{"e-mail na lista e verificado", map[string]any{"email_verified": true}, http.StatusNoContent},
+		{"case-insensitive", map[string]any{"email": "EU@RB.lab", "email_verified": true}, http.StatusNoContent},
+		{"e-mail fora da lista", map[string]any{"email": "intruso@gmail.com", "email_verified": true}, http.StatusForbidden},
+		{"e-mail não verificado", map[string]any{"email_verified": false}, http.StatusForbidden},
+		{"sem claim email_verified", nil, http.StatusForbidden},
+		{"sem e-mail", map[string]any{"email": nil, "email_verified": true}, http.StatusForbidden},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen *UserContext
+			h := a.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				uc, _ := UserFromContext(r.Context())
+				seen = &uc
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+			req.Header.Set("Authorization", "Bearer "+fi.sign(t, tc.override))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			assert.Equal(t, tc.want, rec.Code)
+			if tc.want == http.StatusForbidden {
+				assert.Nil(t, seen, "handler (que cria o usuário) não deve ser chamado")
+				assert.Contains(t, rec.Body.String(), `"code":"not_allowed"`)
+				assert.Contains(t, rec.Header().Get("Content-Type"), "application/problem+json")
+			}
+		})
+	}
+}
+
+func TestAllowlistEmptyAllowsAnyVerifiedOrNot(t *testing.T) {
+	fi := newFakeIssuer(t)
+	a := newAllowlistOIDC(t, fi)
+	code, _ := serve(a, bearer(fi.sign(t, map[string]any{"email": "qualquer@x.com"})))
+	assert.Equal(t, http.StatusNoContent, code)
+}
+
+func TestAllowlistDevMode(t *testing.T) {
+	a := New(context.Background(), config.Auth{Mode: config.AuthModeDev, AllowedEmails: []string{"dev@local"}}, nil)
+	code, _ := serve(a, http.Header{"X-Debug-User": {"u"}, "X-Debug-Email": {"dev@local"}})
+	assert.Equal(t, http.StatusNoContent, code)
+	code, _ = serve(a, http.Header{"X-Debug-User": {"u"}, "X-Debug-Email": {"x@local"}})
+	assert.Equal(t, http.StatusForbidden, code)
+	code, _ = serve(a, http.Header{"X-Debug-User": {"u"}})
+	assert.Equal(t, http.StatusForbidden, code)
+}

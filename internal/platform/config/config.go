@@ -7,6 +7,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -80,6 +81,11 @@ type Auth struct {
 	Audience string   `env:"AUTH_AUDIENCE" envDefault:"rbnotes-api"`
 	// RequiredRole: realm role exigida no token. Vazio = não exige (o acesso é a própria conta).
 	RequiredRole string `env:"AUTH_REQUIRED_ROLE"`
+	// AllowedEmails é a allowlist de e-mails (AUTH_ALLOWED_EMAILS, separados por vírgula, normalizados
+	// para lowercase/trim). Não vazia: só tokens com email_verified=true e e-mail na lista passam
+	// (403 not_allowed); evita que qualquer conta brokered (ex.: Google) vire usuário. Obrigatória
+	// com AUTH_MODE=oidc em APP_ENV=prod.
+	AllowedEmails []string `env:"AUTH_ALLOWED_EMAILS" envSeparator:","`
 }
 
 // Telemetry configura logs e OpenTelemetry (exporter desligado por default).
@@ -93,12 +99,29 @@ type Telemetry struct {
 // MinIO configura o armazenamento de áudio (S3-compatível interno ao cluster). As credenciais são
 // SEGREDO (Vault k3s/rbnotes/prod/minio); nunca são logadas.
 type MinIO struct {
-	Endpoint  string `env:"MINIO_ENDPOINT" envDefault:"localhost:9000"`
-	AccessKey string `env:"MINIO_ACCESS_KEY"`
+	// Server é o MINIO_SERVER do secret do Vault (host:port; um esquema http(s):// é tolerado — ver
+	// Endpoint).
+	Server    string `env:"MINIO_SERVER" envDefault:"localhost:9000"`
+	AccessID  string `env:"MINIO_ACCESS_ID"`
 	SecretKey string `env:"MINIO_SECRET_KEY"`
 	Bucket    string `env:"MINIO_BUCKET" envDefault:"rbnotes-audio"`
 	UseSSL    bool   `env:"MINIO_USE_SSL" envDefault:"false"`
 	Region    string `env:"MINIO_REGION" envDefault:"us-east-1"`
+}
+
+// Endpoint devolve o host[:port] para o cliente minio-go e se deve usar TLS. Um prefixo
+// http:// ou https:// em Server é removido e define o SSL (https => true); sem esquema vale UseSSL.
+func (m MinIO) Endpoint() (hostPort string, secure bool) {
+	server := strings.TrimSpace(m.Server)
+	lower := strings.ToLower(server)
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		return strings.TrimRight(server[len("https://"):], "/"), true
+	case strings.HasPrefix(lower, "http://"):
+		return strings.TrimRight(server[len("http://"):], "/"), false
+	default:
+		return strings.TrimRight(server, "/"), m.UseSSL
+	}
 }
 
 // Audio configura os limites do upload em chunks.
@@ -133,6 +156,7 @@ func Load() (Config, error) {
 	if err := env.Parse(&cfg); err != nil {
 		return Config{}, fmt.Errorf("carregar config: %w", err)
 	}
+	cfg.Auth.AllowedEmails = normalizeEmails(cfg.Auth.AllowedEmails)
 	if err := validateAuth(cfg); err != nil {
 		return Config{}, err
 	}
@@ -155,6 +179,10 @@ func validateAuth(cfg Config) error {
 		if cfg.Auth.Audience == "" {
 			return fmt.Errorf("carregar config: AUTH_AUDIENCE é obrigatório quando AUTH_MODE=oidc")
 		}
+		if cfg.IsProd() && len(cfg.Auth.AllowedEmails) == 0 {
+			return fmt.Errorf("carregar config: AUTH_ALLOWED_EMAILS é obrigatório com AUTH_MODE=oidc em APP_ENV=prod " +
+				"(sem allowlist, qualquer conta do realm — inclusive Google — seria aceita)")
+		}
 		return nil
 	case AuthModeDev:
 		if cfg.Env != "dev" {
@@ -171,3 +199,18 @@ func validateAuth(cfg Config) error {
 
 // IsProd indica se o serviço roda em produção.
 func (c Config) IsProd() bool { return c.Env == "prod" }
+
+// normalizeEmails aplica trim/lowercase e descarta entradas vazias e duplicadas.
+func normalizeEmails(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, e := range in {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" || seen[e] {
+			continue
+		}
+		seen[e] = true
+		out = append(out, e)
+	}
+	return out
+}

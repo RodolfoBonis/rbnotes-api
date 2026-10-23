@@ -47,3 +47,11 @@ registra as decisões que ajustaram/esclareceram o contrato v1 e o porquê.
 
 9. **Modelos** — whitelist `sonnet | opus | haiku` no campo `model` dos pedidos; fora disso → `422`.
    Cota diária por usuário via `AI_DAILY_LIMIT` → `429` com `code: ai_daily_limit`.
+
+10. **Allowlist de e-mail (`AUTH_ALLOWED_EMAILS`) — `403 not_allowed`.** O Keycloak cria o usuário
+    no primeiro login brokered (qualquer conta Google), então um token válido do realm não basta.
+    Com a env preenchida (lista separada por vírgula, case-insensitive), todo endpoint autenticado
+    exige `email_verified=true` e e-mail na lista; caso contrário responde `403` problem+json com
+    `code: "not_allowed"` e NÃO cria o registro em `users`. Em `APP_ENV=prod` com `AUTH_MODE=oidc`
+    a API recusa subir sem a lista. Aditivo: nova resposta `403` documentada em todos os endpoints
+    autenticados.

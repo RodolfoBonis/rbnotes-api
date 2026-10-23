@@ -45,9 +45,10 @@ type Service struct {
 
 // New constrói o serviço de áudio a partir da config do MinIO.
 func New(ctx context.Context, cfg config.MinIO, q *dbgen.Queries, logger *slog.Logger) (*Service, error) {
-	core, err := minio.NewCore(cfg.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
-		Secure: cfg.UseSSL,
+	endpoint, secure := cfg.Endpoint()
+	core, err := minio.NewCore(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(cfg.AccessID, cfg.SecretKey, ""),
+		Secure: secure,
 		Region: cfg.Region,
 	})
 	if err != nil {

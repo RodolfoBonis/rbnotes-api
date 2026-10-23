@@ -30,6 +30,8 @@ const providerInitInterval = 10 * time.Second
 type Authenticator struct {
 	mode         config.AuthMode
 	requiredRole string
+	// allowedEmails: set (lowercase) de e-mails aceitos; vazio = sem restrição.
+	allowedEmails map[string]struct{}
 	// verifier é carregado em background no modo oidc; nil até o provider ser descoberto.
 	verifier atomic.Pointer[oidc.IDTokenVerifier]
 	logger   *slog.Logger
@@ -43,7 +45,13 @@ func New(ctx context.Context, cfg config.Auth, logger *slog.Logger) *Authenticat
 	if logger == nil {
 		logger = slog.Default()
 	}
-	a := &Authenticator{mode: cfg.Mode, requiredRole: cfg.RequiredRole, logger: logger}
+	a := &Authenticator{mode: cfg.Mode, requiredRole: cfg.RequiredRole, logger: logger,
+		allowedEmails: make(map[string]struct{}, len(cfg.AllowedEmails))}
+	for _, e := range cfg.AllowedEmails {
+		if e = strings.ToLower(strings.TrimSpace(e)); e != "" {
+			a.allowedEmails[e] = struct{}{}
+		}
+	}
 	if cfg.Mode == config.AuthModeDev {
 		return a
 	}
@@ -132,6 +140,9 @@ func (a *Authenticator) authenticate(r *http.Request) (UserContext, error) {
 				"defina X-Debug-User no modo dev")
 		}
 		email := r.Header.Get("X-Debug-Email")
+		if err := a.checkAllowed(email, email != ""); err != nil {
+			return UserContext{}, err
+		}
 		return UserContext{Issuer: "dev", Subject: sub, Email: email, EmailVerified: email != "", Name: r.Header.Get("X-Debug-Name")}, nil
 	}
 
@@ -158,10 +169,26 @@ func (a *Authenticator) authenticate(r *http.Request) (UserContext, error) {
 		return UserContext{}, httperr.New(httperr.KindForbidden, "Forbidden",
 			"o token não possui a role exigida")
 	}
+	if err := a.checkAllowed(claims.Email, claims.EmailVerified); err != nil {
+		return UserContext{}, err
+	}
 	return UserContext{
 		Issuer: idToken.Issuer, Subject: idToken.Subject, Email: claims.Email,
 		EmailVerified: claims.EmailVerified, Name: claims.displayName(),
 	}, nil
+}
+
+// checkAllowed aplica a allowlist de e-mails (quando configurada): exige e-mail verificado e
+// presente na lista. Roda ANTES de qualquer criação de usuário (o middleware precede o resolve).
+func (a *Authenticator) checkAllowed(email string, verified bool) error {
+	if len(a.allowedEmails) == 0 {
+		return nil
+	}
+	if _, ok := a.allowedEmails[strings.ToLower(strings.TrimSpace(email))]; !ok || !verified {
+		return httperr.New(httperr.KindForbidden, "Forbidden", "esta conta não tem acesso a este serviço").
+			WithCode("not_allowed")
+	}
+	return nil
 }
 
 // logAuthFailure registra 401/403 em nível info com o motivo (NUNCA o token).

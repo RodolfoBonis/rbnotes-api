@@ -95,7 +95,8 @@ Ver `.env.example`. As principais:
 | DB | `DATABASE_URL` | obrigatório |
 | Redis | `REDIS_ADDR` | canal do SSE |
 | Auth | `AUTH_MODE`/`AUTH_ISSUER`/`AUTH_AUDIENCE` | oidc em prod; `rbnotes` / `rbnotes-api` |
-| MinIO | `MINIO_ENDPOINT`/`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`/`MINIO_BUCKET` | SEGREDO (creds) |
+| Auth | `AUTH_ALLOWED_EMAILS` | allowlist (vírgula, lowercase/trim); exige `email_verified`; fora dela `403 not_allowed` sem criar usuário. **Obrigatória** com `AUTH_MODE=oidc` + `APP_ENV=prod` (a API não sobe sem) |
+| MinIO | `MINIO_SERVER`/`MINIO_ACCESS_ID`/`MINIO_SECRET_KEY`/`MINIO_BUCKET` | SEGREDO (creds; mesmos nomes do secret do Vault). `MINIO_SERVER` é `host:port`; `http(s)://` é removido e `https` liga o SSL (senão `MINIO_USE_SSL`) |
 | Áudio | `AUDIO_CHUNK_LIMIT` | 50 MiB default |
 | IA | `CLAUDE_CODE_OAUTH_TOKEN` | **SEGREDO**, só o ai-worker |
 | IA | `AI_MODEL` | `sonnet` (whitelist: sonnet/opus/haiku) |
@@ -147,11 +148,11 @@ Secrets do GitHub necessários: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `A
 - **ai-worker** (worker `name: ai-worker`, imagem `rbnotes-ai-worker`): 1 réplica (um job por vez),
   volume persistente em `/home/node/.claude` (sessões do `--resume`) e `/home/node/work`.
 - **envs comuns**: `DATABASE_URL`, `REDIS_ADDR`, `AUTH_ISSUER=https://auth.rodolfodebonis.com.br/realms/rbnotes`,
-  `AUTH_AUDIENCE=rbnotes-api`, `MINIO_ENDPOINT` (service interno do MinIO), `MINIO_BUCKET=rbnotes-audio`,
+  `AUTH_AUDIENCE=rbnotes-api`, `AUTH_ALLOWED_EMAILS`, `MINIO_USE_SSL`, `MINIO_BUCKET=rbnotes-audio`,
   `CORS_ALLOWED_ORIGINS`.
 - **secrets** (Sealed/External Secret a partir do Vault):
   - `k3s/rbnotes/prod/claude` → `CLAUDE_CODE_OAUTH_TOKEN` (só no ai-worker).
-  - `k3s/rbnotes/prod/minio` → `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`.
+  - `k3s/rbnotes/prod/minio` → `MINIO_SERVER`, `MINIO_ACCESS_ID`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`.
   - `k3s/rbnotes/prod/db` → `DATABASE_URL` (com senha).
 - **Keycloak**: realm `rbnotes`, client público `rbnotes-desktop` (PKCE, redirect loopback) e o
   client/escopo que injeta a audience `rbnotes-api` nos tokens.

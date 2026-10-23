@@ -79,6 +79,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /sync/push:
     post:
@@ -98,6 +99,7 @@ paths:
               schema: { $ref: "#/components/schemas/PushResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /sync/pull:
     get:
       tags: [sync]
@@ -116,6 +118,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PullResult" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /notes/{id}/audio:
     parameters:
@@ -153,6 +156,7 @@ paths:
                   completed: { type: boolean }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "409":
           description: Upload não iniciado (envie a parte 1 primeiro)
           content:
@@ -170,6 +174,7 @@ paths:
             audio/mp4:
               schema: { type: string, format: binary }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "501": { $ref: "#/components/responses/NotImplemented" }
 
@@ -188,6 +193,7 @@ paths:
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/Validation" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "501": { $ref: "#/components/responses/NotImplemented" }
@@ -207,6 +213,7 @@ paths:
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/Validation" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "501": { $ref: "#/components/responses/NotImplemented" }
@@ -224,6 +231,7 @@ paths:
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/Validation" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "501": { $ref: "#/components/responses/NotImplemented" }
@@ -241,6 +249,7 @@ paths:
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/Validation" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "501": { $ref: "#/components/responses/NotImplemented" }
@@ -258,6 +267,7 @@ paths:
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/Validation" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "501": { $ref: "#/components/responses/NotImplemented" }
@@ -276,6 +286,7 @@ paths:
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "501": { $ref: "#/components/responses/NotImplemented" }
 
@@ -305,6 +316,7 @@ paths:
             text/event-stream:
               schema: { type: string }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
 components:
@@ -336,6 +348,13 @@ components:
           schema: { $ref: "#/components/schemas/Problem" }
     Unauthorized:
       description: Token ausente ou inválido
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: >-
+        Conta autenticada sem acesso: role exigida ausente ou, com AUTH_ALLOWED_EMAILS configurada,
+        e-mail não verificado/fora da allowlist (`code: not_allowed`). Nenhum usuário é criado.
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
