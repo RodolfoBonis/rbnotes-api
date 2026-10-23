@@ -92,3 +92,26 @@ func TestSyncIsolationBetweenUsers(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(body), &pull))
 	require.Empty(t, pull.Changes, "bob não pode ver notas da alice")
 }
+
+func TestSyncValidation(t *testing.T) {
+	srv := newTestServer(t)
+	do(t, srv, http.MethodGet, "/v1/me", "alice", "")
+
+	// Entidade desconhecida → 422.
+	bad := `{"changes":[{"entity":"gremlin","id":"x","updatedAt":"2026-10-20T12:00:00Z","data":{}}]}`
+	status, _ := do(t, srv, http.MethodPost, "/v1/sync/push", "alice", bad)
+	require.Equal(t, http.StatusUnprocessableEntity, status)
+
+	// Id vazio → 422.
+	bad = `{"changes":[{"entity":"note","id":"","updatedAt":"2026-10-20T12:00:00Z","data":{}}]}`
+	status, _ = do(t, srv, http.MethodPost, "/v1/sync/push", "alice", bad)
+	require.Equal(t, http.StatusUnprocessableEntity, status)
+
+	// since malformado → 400.
+	status, _ = do(t, srv, http.MethodGet, "/v1/sync/pull?since=notanumber", "alice", "")
+	require.Equal(t, http.StatusBadRequest, status)
+
+	// since válido → 200.
+	status, _ = do(t, srv, http.MethodGet, "/v1/sync/pull?since=0", "alice", "")
+	require.Equal(t, http.StatusOK, status)
+}

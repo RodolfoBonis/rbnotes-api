@@ -24,6 +24,12 @@ func (h *Handlers) pushChanges(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, syncpkg.ErrTooManyChanges):
 		httperr.Write(w, r, httperr.New(httperr.KindBadRequest, "Bad request", err.Error()))
 		return
+	case errors.Is(err, syncpkg.ErrUnknownEntity):
+		httperr.Write(w, r, httperr.Validation(err.Error()).WithCode("unknown_entity"))
+		return
+	case errors.Is(err, syncpkg.ErrInvalidID):
+		httperr.Write(w, r, httperr.Validation(err.Error()).WithCode("invalid_id"))
+		return
 	case err != nil:
 		writeInternal(w, r, err)
 		return
@@ -34,7 +40,11 @@ func (h *Handlers) pushChanges(w http.ResponseWriter, r *http.Request) {
 // pullChanges — GET /sync/pull?since=<cursor> → {changes, cursor}.
 func (h *Handlers) pullChanges(w http.ResponseWriter, r *http.Request) {
 	res, err := h.sync.Pull(r.Context(), currentUser(r).ID, r.URL.Query().Get("since"))
-	if err != nil {
+	switch {
+	case errors.Is(err, syncpkg.ErrBadCursor):
+		httperr.Write(w, r, httperr.New(httperr.KindBadRequest, "Bad request", "parâmetro since inválido"))
+		return
+	case err != nil:
 		writeInternal(w, r, err)
 		return
 	}

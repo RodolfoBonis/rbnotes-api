@@ -49,6 +49,19 @@ const pullPageSize = 500
 // ErrTooManyChanges indica um push acima de MaxPushChanges.
 var ErrTooManyChanges = fmt.Errorf("sync: push com mais de %d mudanças", MaxPushChanges)
 
+// maxEntityIDLen limita o id vindo do cliente (defesa; ids são ULIDs/UUIDs curtos).
+const maxEntityIDLen = 256
+
+// Erros de validação do push/pull (viram 422/400 na borda).
+var (
+	// ErrUnknownEntity: entidade fora do conjunto sincronizável.
+	ErrUnknownEntity = errors.New("sync: entidade desconhecida")
+	// ErrInvalidID: id de entidade vazio ou longo demais.
+	ErrInvalidID = errors.New("sync: id inválido")
+	// ErrBadCursor: parâmetro since/cursor malformado.
+	ErrBadCursor = errors.New("sync: cursor inválido")
+)
+
 // Change é uma mudança de uma entidade (contrato camelCase com o desktop).
 type Change struct {
 	Entity    string          `json:"entity"`
@@ -97,10 +110,10 @@ func (s *Service) Push(ctx context.Context, userID pgtype.UUID, changes []Change
 
 	for _, ch := range changes {
 		if !validEntities[ch.Entity] {
-			return res, fmt.Errorf("sync: entidade desconhecida %q", ch.Entity)
+			return res, fmt.Errorf("%w: %q", ErrUnknownEntity, ch.Entity)
 		}
-		if ch.ID == "" {
-			return res, errors.New("sync: id vazio")
+		if ch.ID == "" || len(ch.ID) > maxEntityIDLen {
+			return res, fmt.Errorf("%w: %q", ErrInvalidID, ch.ID)
 		}
 		server, found, err := getEntity(ctx, q, ch.Entity, userID, ch.ID)
 		if err != nil {
@@ -161,7 +174,10 @@ func (s *Service) indexNote(ctx context.Context, q *dbgen.Queries, entity string
 
 // Pull devolve a página de mudanças após o cursor e o novo cursor (o maior change_seq devolvido).
 func (s *Service) Pull(ctx context.Context, userID pgtype.UUID, cursor string) (PullResult, error) {
-	cur := parseCursor(cursor)
+	cur, err := parseCursor(cursor)
+	if err != nil {
+		return PullResult{}, err
+	}
 	rows, err := s.q.PullChanges(ctx, dbgen.PullChangesParams{Uid: userID, Cur: cur, Lim: pullPageSize})
 	if err != nil {
 		return PullResult{}, fmt.Errorf("sync: pull: %w", err)
@@ -180,15 +196,17 @@ func (s *Service) Pull(ctx context.Context, userID pgtype.UUID, cursor string) (
 	return out, nil
 }
 
-func parseCursor(s string) int64 {
+// parseCursor converte o since/cursor. Vazio = 0 (do início); malformado ou negativo = ErrBadCursor
+// (400 na borda, em vez de silenciosamente recomeçar do zero e re-enviar tudo).
+func parseCursor(s string) (int64, error) {
 	if s == "" {
-		return 0
+		return 0, nil
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || n < 0 {
-		return 0
+		return 0, ErrBadCursor
 	}
-	return n
+	return n, nil
 }
 
 func rawOrEmpty(b []byte) json.RawMessage {

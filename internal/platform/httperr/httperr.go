@@ -5,8 +5,10 @@ package httperr
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
+	chimw "github.com/go-chi/chi/v5/middleware"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -181,10 +183,24 @@ func Write(w http.ResponseWriter, r *http.Request, err error) {
 		appErr = Wrap(KindInternal, "Internal error", err)
 	}
 	status := appErr.Kind.status()
+	trace := traceID(r)
 
 	detail := appErr.Detail
 	if appErr.Kind == KindInternal {
-		detail = "" // nunca expor detalhe interno
+		// Nunca expor o detalhe interno ao cliente, mas SEMPRE logar a causa com o request_id/trace
+		// para ser possível correlacionar o 500 no cliente com o log do servidor.
+		cause := appErr.Detail
+		if cause == "" && appErr.wrapped != nil {
+			cause = appErr.wrapped.Error()
+		}
+		slog.ErrorContext(r.Context(), "erro interno (500)",
+			slog.String("err", cause),
+			slog.String("request_id", chimw.GetReqID(r.Context())),
+			slog.String("trace_id", trace),
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+		)
+		detail = ""
 	}
 
 	p := Problem{
@@ -193,7 +209,7 @@ func Write(w http.ResponseWriter, r *http.Request, err error) {
 		Status:   status,
 		Detail:   detail,
 		Instance: r.URL.Path,
-		TraceID:  traceID(r),
+		TraceID:  trace,
 		Code:     appErr.Code,
 		Errors:   appErr.Fields,
 	}
