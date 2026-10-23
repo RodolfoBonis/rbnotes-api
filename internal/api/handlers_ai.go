@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -171,6 +172,9 @@ const (
 	sseMaxDuration = 15 * time.Minute
 )
 
+// lastEventIDRe valida o Last-Event-ID (formato de id do Redis Streams: "<ms>-<seq>").
+var lastEventIDRe = regexp.MustCompile(`^\d+-\d+$`)
+
 // aiStream — GET /ai/streams/{id} (SSE): a resposta da IA em tempo real. Eventos: status/text/json/
 // tool (parciais) e done/error (finais). Retoma do Last-Event-ID. Se a resposta já terminou e a
 // stream do Redis expirou, manda só o evento final (do ai_jobs).
@@ -181,6 +185,11 @@ func (h *Handlers) aiStream(w http.ResponseWriter, r *http.Request) {
 	id, err := parseUUIDParam(chi.URLParam(r, "id"))
 	if err != nil {
 		httperr.Write(w, r, httperr.New(httperr.KindBadRequest, "Bad request", "id inválido"))
+		return
+	}
+	// Valida o Last-Event-ID ANTES de comprometer o 200 do SSE (um valor malformado é 400).
+	if le := r.Header.Get("Last-Event-ID"); le != "" && !lastEventIDRe.MatchString(le) {
+		httperr.Write(w, r, httperr.New(httperr.KindBadRequest, "Bad request", "Last-Event-ID inválido"))
 		return
 	}
 	final, ok := h.streamFinalState(w, r, id)
@@ -196,9 +205,13 @@ func (h *Handlers) aiStream(w http.ResponseWriter, r *http.Request) {
 	hd.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	send := func(evID, typ, data string) bool {
+	sendEvent := func(evID, typ, data, code string) bool {
 		_ = rc.SetWriteDeadline(time.Now().Add(30 * time.Second))
-		payload, _ := json.Marshal(map[string]string{"data": data})
+		m := map[string]string{"data": data}
+		if code != "" {
+			m["code"] = code
+		}
+		payload, _ := json.Marshal(m)
 		var b strings.Builder
 		if evID != "" {
 			fmt.Fprintf(&b, "id: %s\n", evID)
@@ -209,6 +222,7 @@ func (h *Handlers) aiStream(w http.ResponseWriter, r *http.Request) {
 		}
 		return rc.Flush() == nil
 	}
+	send := func(evID, typ, data string) bool { return sendEvent(evID, typ, data, "") }
 
 	ctx := r.Context()
 	last := r.Header.Get("Last-Event-ID")
@@ -246,6 +260,11 @@ func (h *Handlers) aiStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+	// Saiu por duração máxima (não por desconexão do cliente): manda um evento final para o cliente
+	// parar de reconectar para sempre.
+	if ctx.Err() == nil {
+		sendEvent("", stream.TypeError, "A resposta demorou demais. Recarregue para tentar de novo.", "stream_timeout")
 	}
 }
 

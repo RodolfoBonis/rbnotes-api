@@ -141,6 +141,8 @@ func ValidateNoteAi(raw []byte, nSegments int) ([]byte, error) {
 			return nil, err
 		}
 	}
+	n.Title = capRunes(strings.TrimSpace(n.Title), maxTitleLen)
+	n.Tldr = capRunes(strings.TrimSpace(n.Tldr), maxTldrLen)
 	n.Points, n.Decisions, n.Questions = clean(n.Points), clean(n.Decisions), clean(n.Questions)
 	n.SpeakerNames.Others = clean(n.SpeakerNames.Others)
 	return json.Marshal(n)
@@ -181,6 +183,7 @@ func ValidateChat(raw []byte, allowed map[int64]bool) ([]byte, error) {
 	if strings.TrimSpace(a.Text) == "" {
 		return nil, fmt.Errorf("%w: resposta vazia", ErrInvalidOutput)
 	}
+	a.Text = capRunes(a.Text, maxTextLen)
 	if len(allowed) > 0 {
 		kept := make([]Cite, 0, len(a.Cites))
 		for _, c := range a.Cites {
@@ -232,6 +235,7 @@ func ValidateAsk(raw []byte, candidates map[string]string) ([]byte, error) {
 	if strings.TrimSpace(a.Text) == "" {
 		return nil, fmt.Errorf("%w: resposta vazia", ErrInvalidOutput)
 	}
+	a.Text = capRunes(a.Text, maxTextLen)
 	kept := make([]Source, 0, len(a.Sources))
 	seen := map[string]bool{}
 	for _, src := range a.Sources {
@@ -370,7 +374,27 @@ func strictDecode(raw []byte, dst any) error {
 	if err := dec.Decode(dst); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidOutput, err)
 	}
+	// Rejeita lixo depois do JSON (ex.: um segundo objeto, texto solto): só um valor é válido.
+	if dec.More() {
+		return fmt.Errorf("%w: dados após o JSON", ErrInvalidOutput)
+	}
 	return nil
+}
+
+// Limites de tamanho da saída da IA (defesa contra respostas patológicas).
+const (
+	maxTitleLen = 300
+	maxTldrLen  = 4000
+	maxTextLen  = 20000
+)
+
+// capRunes corta s em no máximo n runes (sem partir um code point).
+func capRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 func checkIndex(idx, n int, field string) error {

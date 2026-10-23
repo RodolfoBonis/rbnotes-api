@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -46,7 +47,30 @@ const (
 	maxDiaryNotes    = 60
 	maxDailyNotes    = 8
 	maxChatMessage   = 8000
+	// maxTranscriptSegments / maxTranscriptChars limitam o tamanho de uma transcrição por request.
+	maxTranscriptSegments = 5000
+	maxTranscriptChars    = 400000
+	// maxThreadIDLen limita o threadId do chat (usado como nome de diretório do --resume).
+	maxThreadIDLen = 64
 )
+
+// threadIDRe valida o threadId do chat: só caracteres seguros para nome de diretório.
+var threadIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,` + "64" + `}$`)
+
+// validateTranscript aplica o teto de segmentos e de caracteres de uma transcrição.
+func validateTranscript(segs []Segment) error {
+	if len(segs) > maxTranscriptSegments {
+		return fmt.Errorf("%w: transcrição com mais de %d segmentos", ErrBadInput, maxTranscriptSegments)
+	}
+	total := 0
+	for _, s := range segs {
+		total += len(s.Text)
+		if total > maxTranscriptChars {
+			return fmt.Errorf("%w: transcrição acima de %d caracteres", ErrBadInput, maxTranscriptChars)
+		}
+	}
+	return nil
+}
 
 // Erros de domínio expostos à API.
 var (
@@ -155,6 +179,9 @@ func (s *Service) RequestEnrich(ctx context.Context, userID pgtype.UUID, noteID 
 	if noteID == "" || len(in.Transcript) == 0 {
 		return dbgen.AiJob{}, fmt.Errorf("%w: transcript obrigatório", ErrBadInput)
 	}
+	if err := validateTranscript(in.Transcript); err != nil {
+		return dbgen.AiJob{}, err
+	}
 	return s.request(ctx, userID, KindEnrich, noteID, "", in.Model, in)
 }
 
@@ -166,6 +193,12 @@ func (s *Service) RequestChat(ctx context.Context, userID pgtype.UUID, in ChatIn
 	}
 	if len([]rune(in.Message)) > maxChatMessage {
 		in.Message = string([]rune(in.Message)[:maxChatMessage])
+	}
+	if in.ThreadID != "" && (len(in.ThreadID) > maxThreadIDLen || !threadIDRe.MatchString(in.ThreadID)) {
+		return dbgen.AiJob{}, fmt.Errorf("%w: threadId inválido (até %d caracteres [A-Za-z0-9_-])", ErrBadInput, maxThreadIDLen)
+	}
+	if err := validateTranscript(in.Transcript); err != nil {
+		return dbgen.AiJob{}, err
 	}
 	return s.request(ctx, userID, KindChat, "", in.ThreadID, in.Model, in)
 }

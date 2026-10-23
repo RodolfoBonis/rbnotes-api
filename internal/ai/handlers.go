@@ -51,7 +51,7 @@ func (s *Service) handleChat(ctx context.Context, aj dbgen.AiJob, pub *stream.Pu
 		}
 	}
 	allowed := startMsSet(in.Transcript)
-	workdir := s.dir("chat", safeDir(in.ThreadID))
+	workdir := s.dir("chat", uuidString(aj.UserID), safeDir(in.ThreadID))
 
 	req := claude.Request{Prompt: chatPrompt(in.Message, nil, in.Transcript, resume != ""), JSONSchema: NoteChatSchema, Workdir: workdir, ResumeID: resume}
 	// Se a sessão existir, o prompt completo não é necessário; o run refaz sem resume se a sessão

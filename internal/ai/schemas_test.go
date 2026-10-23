@@ -1,6 +1,9 @@
 package ai
 
 import (
+	"strings"
+	"context"
+	"github.com/jackc/pgx/v5/pgtype"
 	"encoding/json"
 	"testing"
 
@@ -96,4 +99,36 @@ func TestValidateDiaryAndDaily(t *testing.T) {
 	require.NoError(t, err)
 	_, err = ValidateDailyPrompt([]byte(`{"prompt":""}`))
 	require.ErrorIs(t, err, ErrInvalidOutput)
+}
+
+func TestStrictDecodeRejectsTrailingData(t *testing.T) {
+	// Lixo depois do JSON é rejeitado (um segundo objeto).
+	_, err := ValidateChat([]byte(`{"text":"oi","cites":[]} {"x":1}`), nil)
+	require.ErrorIs(t, err, ErrInvalidOutput)
+}
+
+func TestValidateNoteAiCapsStrings(t *testing.T) {
+	longTitle := strings.Repeat("a", maxTitleLen+50)
+	raw := []byte(`{"title":"` + longTitle + `","tldr":"ok","points":[],"quote":null,"actions":[],"decisions":[],"questions":[],"speakerNames":{"others":[],"segments":[]}}`)
+	out, err := ValidateNoteAi(raw, 0)
+	require.NoError(t, err)
+	var n NoteAi
+	require.NoError(t, json.Unmarshal(out, &n))
+	require.Len(t, []rune(n.Title), maxTitleLen)
+}
+
+func TestValidateTranscriptLimits(t *testing.T) {
+	segs := make([]Segment, maxTranscriptSegments+1)
+	require.ErrorIs(t, validateTranscript(segs), ErrBadInput)
+
+	big := Segment{Text: strings.Repeat("x", maxTranscriptChars+1)}
+	require.ErrorIs(t, validateTranscript([]Segment{big}), ErrBadInput)
+
+	require.NoError(t, validateTranscript([]Segment{{Text: "curto"}}))
+}
+
+func TestRequestChatRejectsBadThreadID(t *testing.T) {
+	svc := New(Deps{})
+	_, err := svc.RequestChat(context.Background(), pgtype.UUID{}, ChatInput{Message: "oi", ThreadID: "bad id/with*chars"})
+	require.ErrorIs(t, err, ErrBadInput)
 }
