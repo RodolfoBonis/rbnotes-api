@@ -2,7 +2,15 @@
 // transmite a saída em tempo real:
 //
 //	claude -p --output-format stream-json --verbose --include-partial-messages
-//	       [--json-schema <schema>] [--resume <id>] [--model <m>] --allowedTools WebSearch,WebFetch
+//	       --tools <lista> --allowedTools <lista> --strict-mcp-config --disable-slash-commands
+//	       [--json-schema <schema>] [--resume <id>] [--model <m>]
+//
+// CONTENÇÃO DE PROMPT INJECTION: --tools restringe o CONJUNTO de ferramentas que a CLI expõe ao
+// modelo. Com o default "" só fica a StructuredOutput do --json-schema; sem essa flag a CLI expõe
+// centenas de ferramentas (Bash, Read, Edit, Task…), que um texto malicioso na transcrição poderia
+// tentar acionar. --allowedTools (a allowlist do que roda sem confirmação) é mantido ALINHADO ao
+// --tools. --strict-mcp-config ignora qualquer configuração de MCP herdada do ambiente e
+// --disable-slash-commands desliga os comandos de barra: a CLI não oferece caminho de injeção.
 //
 // O prompt vai pelo STDIN (nunca vira flag). O processo roda com ambiente mínimo por allowlist (sem
 // herdar as credenciais do worker), HOME estável (as sessões do --resume vivem em ~/.claude) e grupo
@@ -11,7 +19,7 @@
 // Cada linha do stream-json vira, quando interessa à UI, um Event:
 //   - text: pedaço de texto da resposta (chat);
 //   - json: pedaço do JSON da saída estruturada (guias — a UI renderiza o JSON parcial);
-//   - tool: o modelo usou uma ferramenta (ex.: pesquisa na web), com a consulta.
+//   - tool: o modelo usou uma ferramenta, com a consulta.
 //
 // Falhas da execução (timeout, saída vazia, erro da CLI, limite de uso) voltam em Result.Err /
 // Result.RateLimited; erro de Go só em falha de infra (não conseguiu lançar o processo).
@@ -44,7 +52,9 @@ type Request struct {
 	ResumeID string
 	// Workdir é o cwd da CLI. As sessões do --resume são guardadas por cwd: retomar exige o mesmo.
 	Workdir string
-	// AllowedTools liberadas sem prompt (vazio = nenhuma ferramenta).
+	// AllowedTools é, ao mesmo tempo, o CONJUNTO de ferramentas exposto ao modelo (--tools) e a
+	// allowlist do que roda sem confirmação (--allowedTools): os dois ficam alinhados. Vazio =
+	// nenhuma ferramenta além da StructuredOutput do --json-schema.
 	AllowedTools string
 }
 
@@ -142,8 +152,18 @@ func (r *Runner) Run(ctx context.Context, req Request, onEvent func(Event)) (Res
 
 // buildArgs monta os argumentos fixos. O prompt NÃO entra aqui (vai por stdin).
 func (r *Runner) buildArgs(req Request) []string {
-	args := []string{"-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-		"--allowedTools", req.AllowedTools}
+	// --tools limita o CONJUNTO de ferramentas que a CLI expõe ao modelo; --allowedTools é a
+	// allowlist do que roda sem confirmação. Mantemos os dois ALINHADOS e, por padrão (""), só a
+	// StructuredOutput do --json-schema fica disponível. --strict-mcp-config descarta qualquer MCP
+	// herdado e --disable-slash-commands desliga os comandos de barra: nenhum caminho de injeção
+	// pela CLI, mesmo que a transcrição traga instruções maliciosas.
+	args := []string{
+		"-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+		"--tools", req.AllowedTools,
+		"--allowedTools", req.AllowedTools,
+		"--strict-mcp-config",
+		"--disable-slash-commands",
+	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}

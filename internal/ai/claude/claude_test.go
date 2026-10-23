@@ -75,8 +75,27 @@ func TestBuildArgs(t *testing.T) {
 	require.Contains(t, joined, "--output-format stream-json")
 	require.Contains(t, joined, "--json-schema {}")
 	require.NotContains(t, joined, "--resume", "resume id que não é UUID é descartado")
+	// Contenção de prompt injection: o conjunto de ferramentas (--tools) e a allowlist
+	// (--allowedTools) ficam alinhados, e a CLI não aceita MCP herdado nem slash commands.
+	require.Contains(t, joined, "--tools WebSearch,WebFetch")
+	require.Contains(t, joined, "--allowedTools WebSearch,WebFetch")
+	require.Contains(t, joined, "--strict-mcp-config")
+	require.Contains(t, joined, "--disable-slash-commands")
 	args = r.buildArgs(Request{ResumeID: "58ea8a5d-1e36-4132-a4c8-53a557f97780"})
 	require.Contains(t, strings.Join(args, " "), "--resume 58ea8a5d-1e36-4132-a4c8-53a557f97780")
+
+	// Default (AllowedTools vazio): --tools e --allowedTools são passados como argumento vazio, de
+	// modo que a CLI só expõe a StructuredOutput do --json-schema.
+	def := r.buildArgs(Request{})
+	require.Contains(t, def, "--tools")
+	require.Contains(t, def, "--allowedTools")
+	require.Contains(t, def, "--strict-mcp-config")
+	require.Contains(t, def, "--disable-slash-commands")
+	for i, a := range def {
+		if a == "--tools" || a == "--allowedTools" {
+			require.Equal(t, "", def[i+1], "default do conjunto/allowlist de ferramentas é vazio")
+		}
+	}
 }
 
 // fakeCLI grava um script que imita a CLI (lê o prompt do stdin, confere o ambiente).
