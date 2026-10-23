@@ -1,0 +1,54 @@
+{"type": "stream_event", "event": {"type": "message_start", "message": {"model": "claude-haiku-4-5-20251001", "id": "msg_011Cg8RW2NpqXXFnbTsMo7kq", "type": "message", "role": "assistant", "content": [], "container": null, "stop_reason": null, "stop_sequence": null, "stop_details": null, "usage": {"input_tokens": 9, "cache_creation_input_tokens": 40260, "cache_read_input_tokens": 0, "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 40260}, "output_tokens": 1, "service_tier": "standard", "inference_geo": "not_available", "speed": "standard"}, "input_transformations": [], "diagnostics": null, "context_management": null}}}
+{"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"ToolSearch","input":{"query":"select:WebSearch"}}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "WebSearch", "input": {"query": "Hades platinum trophy guide"}}]}}
+{"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}}
+{"type": "stream_event", "event": {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_01HdjswTePj3hqv2xZpvEnnR", "name": "StructuredOutput", "input": {}, "caller": {"type": "direct"}}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": ""}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"tip\":"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": " \"O tro"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "féu Pla"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "tina em"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": " Hades "}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "é desbl"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "oqueado"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": " após c"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "onquist"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "ar todo"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "s os ou"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "tros tr"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "oféus. "}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "Foque p"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "rimeiro"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": " em com"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "pletar "}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "as pist"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "as de o"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "uro (co"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "mo venc"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "er o jo"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "go vári"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "as veze"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "s, expl"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "orar to"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "das as "}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "armas e"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": " execut"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "ar desa"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "fios es"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "pecífic"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "os), po"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "is eles"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": " são os"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": " bloque"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "adores "}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "princip"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "ais.\""}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": ", \"conf"}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "idence\""}}}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": ": 0.85}"}}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_01HdjswTePj3hqv2xZpvEnnR", "name": "StructuredOutput", "input": {"tip": "O troféu Platina em Hades é desbloqueado após conquistar todos os outros troféus. Foque primeiro em completar as pistas de ouro (como vencer o jogo várias vezes, explorar todas as armas e executar desafios específicos), pois eles são os bloqueadores principais.", "confidence": 0.85}, "caller": {"type": "direct"}}]}}
+{"type": "stream_event", "event": {"type": "content_block_stop", "index": 1}}
+{"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": null, "stop_details": null, "container": null}, "usage": {"input_tokens": 9, "cache_creation_input_tokens": 40260, "cache_read_input_tokens": 0, "output_tokens": 380, "output_tokens_details": {"thinking_tokens": 228}}, "context_management": {"applied_edits": []}}}
+{"type": "stream_event", "event": {"type": "message_stop"}}
+{"type": "result", "subtype": "success", "is_error": false, "result": "{\"tip\":\"O troféu Platina em Hades é desbloqueado após conquistar todos os outros troféus. Foque primeiro em completar as pistas de ouro (como vencer o jogo várias vezes, explorar todas as armas e executar desafios específicos), pois eles são os bloqueadores principais.\",\"confidence\":0.85}", "structured_output": {"tip": "O troféu Platina em Hades é desbloqueado após conquistar todos os outros troféus. Foque primeiro em completar as pistas de ouro (como vencer o jogo várias vezes, explorar todas as armas e executar desafios específicos), pois eles são os bloqueadores principais.", "confidence": 0.85}, "session_id": "58ea8a5d-1e36-4132-a4c8-53a557f97780", "total_cost_usd": 0.08242899999999999}
