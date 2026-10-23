@@ -329,12 +329,12 @@ func (s *Service) run(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher
 		res, err = s.runner.Run(ctx, req, forward(ctx, pub))
 	}
 	if err != nil {
-		_ = pub.Close(ctx, stream.TypeStatus, "Falha ao iniciar a IA — tentando de novo")
+		s.closeStream(ctx, pub, stream.TypeStatus, "Falha ao iniciar a IA — tentando de novo")
 		return nil, err
 	}
 	if res.RateLimited {
 		metrics.AIJob(aj.Kind, "rate_limited")
-		_ = pub.Close(ctx, stream.TypeStatus, "Limite de uso da IA atingido — nova tentativa em breve")
+		s.closeStream(ctx, pub, stream.TypeStatus, "Limite de uso da IA atingido — nova tentativa em breve")
 		return nil, errors.New("ai: limite de uso")
 	}
 	if res.Err != "" {
@@ -347,25 +347,32 @@ func (s *Service) run(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher
 	return content, nil
 }
 
-// fail marca o job com erro, encerra a stream e devolve um erro permanente (não reprocessa).
+// fail marca o job com erro, encerra a stream e devolve um erro permanente (não reprocessa). O
+// bookkeeping (FailAIJob + fechar a stream) roda num contexto WithoutCancel: um deadline do job
+// (jobCtx cancelado) não pode impedir a marcação do erro nem a notificação da UI.
 func (s *Service) fail(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher, cause string) error {
 	metrics.AIJob(aj.Kind, "error")
 	s.logger.Warn("ai: job falhou", slog.String("kind", aj.Kind), slog.String("job_id", uuidString(aj.ID)), slog.String("err", truncate(cause, 300)))
 	msg := userMessage(cause)
-	if err := s.q.FailAIJob(ctx, dbgen.FailAIJobParams{ID: aj.ID, Error: msg}); err != nil {
-		return err
+	bg, cancel := bookkeepingCtx(ctx)
+	defer cancel()
+	if err := s.q.FailAIJob(bg, dbgen.FailAIJobParams{ID: aj.ID, Error: msg}); err != nil {
+		s.logger.ErrorContext(bg, "ai: marcar job como erro falhou", slog.String("job_id", uuidString(aj.ID)), slog.String("err", err.Error()))
 	}
-	_ = pub.Close(ctx, stream.TypeError, msg)
+	s.closeStream(bg, pub, stream.TypeError, msg)
 	return queue.Permanent(errors.New(cause))
 }
 
-// done persiste o resultado, fecha a stream com sucesso e conta a métrica.
+// done persiste o resultado, fecha a stream com sucesso e conta a métrica. O bookkeeping roda em
+// WithoutCancel para sobreviver a um cancelamento tardio do pai.
 func (s *Service) done(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher, content []byte) error {
-	if err := s.q.CompleteAIJob(ctx, dbgen.CompleteAIJobParams{ID: aj.ID, Result: content, Model: aj.Model}); err != nil {
+	bg, cancel := bookkeepingCtx(ctx)
+	defer cancel()
+	if err := s.q.CompleteAIJob(bg, dbgen.CompleteAIJobParams{ID: aj.ID, Result: content, Model: aj.Model}); err != nil {
 		return err
 	}
 	metrics.AIJob(aj.Kind, "ok")
-	_ = pub.Close(ctx, stream.TypeDone, "")
+	s.closeStream(bg, pub, stream.TypeDone, "")
 	return nil
 }
 
@@ -381,11 +388,36 @@ func (s *Service) giveUp(ctx context.Context, job queue.Job) {
 	if err != nil {
 		return
 	}
-	_ = s.q.FailAIJob(ctx, dbgen.FailAIJobParams{ID: id, Error: msg})
-	_ = stream.NewPublisher(ctx, s.rdb, p.JobID).Close(ctx, stream.TypeError, msg)
+	bg, cancel := bookkeepingCtx(ctx)
+	defer cancel()
+	if err := s.q.FailAIJob(bg, dbgen.FailAIJobParams{ID: id, Error: msg}); err != nil {
+		s.logger.ErrorContext(bg, "ai: giveUp FailAIJob falhou", slog.String("job_id", p.JobID), slog.String("err", err.Error()))
+	}
+	s.closeStream(bg, stream.NewPublisher(bg, s.rdb, p.JobID), stream.TypeError, msg)
 }
 
 /* ── helpers ──────────────────────────────────────────────────────────────────────────── */
+
+// bookkeepingTimeout é o teto dos contextos de pós-processamento (marcar erro/concluído, fechar a
+// stream). Curto: só precisa de uma escrita no banco e um XADD.
+const bookkeepingTimeout = 10 * time.Second
+
+// bookkeepingCtx deriva um contexto que NÃO herda o cancelamento do pai (WithoutCancel) com um
+// deadline curto: usado para o bookkeeping após um job, resistindo ao SIGTERM/deadline do job.
+func bookkeepingCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), bookkeepingTimeout)
+}
+
+// closeStream fecha a stream publicando o evento final e LOGA a falha (antes era silenciosa).
+func (s *Service) closeStream(ctx context.Context, pub *stream.Publisher, typ, data string) {
+	if pub == nil {
+		return
+	}
+	if err := pub.Close(ctx, typ, data); err != nil {
+		s.logger.ErrorContext(ctx, "ai: fechar stream falhou", slog.String("type", typ), slog.String("err", err.Error()))
+	}
+}
+
 
 // forward repassa os eventos da CLI para a stream (saída estruturada → eventos json).
 func forward(ctx context.Context, pub *stream.Publisher) func(claude.Event) {
