@@ -135,7 +135,10 @@ func (s *Service) Push(ctx context.Context, userID pgtype.UUID, changes []Change
 		}
 		if found {
 			serverTime := server.UpdatedAt.Time
+			// O JSONB volta normalizado pelo Postgres ({"a": 1}); o do cliente vem cru ({"a":1}).
+			// Canoniza os dois para o desempate ser determinístico entre dispositivos.
 			cData, sData := rawOrEmpty(ch.Data), rawOrEmpty(server.Data)
+			cCmp, sCmp := canonicalJSON(cData), canonicalJSON(sData)
 			switch {
 			case ch.UpdatedAt.Before(serverTime):
 				// O servidor tem uma versão mais nova: conflito, devolve a do servidor.
@@ -147,11 +150,11 @@ func (s *Service) Push(ctx context.Context, userID pgtype.UUID, changes []Change
 			case ch.UpdatedAt.Equal(serverTime):
 				// Empate de timestamp: idempotente se o conteúdo é igual; senão desempata pelo
 				// conteúdo (comparação determinística e simétrica entre dispositivos).
-				if ch.Deleted == server.Deleted && bytes.Equal(cData, sData) {
+				if ch.Deleted == server.Deleted && bytes.Equal(cCmp, sCmp) {
 					res.Applied = append(res.Applied, ch.ID)
 					continue
 				}
-				if bytes.Compare(cData, sData) <= 0 {
+				if bytes.Compare(cCmp, sCmp) <= 0 {
 					res.Conflicts = append(res.Conflicts, Change{
 						Entity: ch.Entity, ID: ch.ID, UpdatedAt: serverTime,
 						Deleted: server.Deleted, Data: sData,
@@ -327,4 +330,20 @@ func upsertEntity(ctx context.Context, q *dbgen.Queries, entity string, userID p
 		return fmt.Errorf("sync: upsert %s: %w", entity, err)
 	}
 	return nil
+}
+
+// canonicalJSON reescreve um documento JSON numa forma canônica (chaves ordenadas, sem espaços),
+// para comparar valores e não a formatação. Se não for JSON válido, devolve os bytes originais.
+func canonicalJSON(b []byte) []byte {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber() // preserva inteiros grandes (sem passar por float64)
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return b
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return b
+	}
+	return out
 }
