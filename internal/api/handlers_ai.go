@@ -284,7 +284,9 @@ func (h *Handlers) streamFinalState(w http.ResponseWriter, r *http.Request, id p
 	}
 	switch aj.Status {
 	case "done":
-		return &finalEvent{stream.TypeDone, ""}, true
+		// A stream do Redis pode já ter expirado (os `json` parciais se perderam): o `done` carrega
+		// o resultado canônico salvo no banco, para o cliente ter a resposta íntegra mesmo assim.
+		return &finalEvent{stream.TypeDone, string(aj.Result)}, true
 	case "error":
 		return &finalEvent{stream.TypeError, aj.Error}, true
 	}

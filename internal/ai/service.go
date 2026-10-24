@@ -419,6 +419,11 @@ func (s *Service) fail(ctx context.Context, aj dbgen.AiJob, pub *stream.Publishe
 
 // done persiste o resultado, fecha a stream com sucesso e conta a métrica. O bookkeeping roda em
 // WithoutCancel para sobreviver a um cancelamento tardio do pai.
+//
+// O evento final `done` carrega o RESULTADO CANÔNICO (o mesmo JSON validado salvo em ai_jobs.result):
+// é a fonte da verdade para o cliente. Os eventos `json` parciais existem só para a UI de streaming
+// (o objeto cresce aos poucos) e podem se perder numa reconexão depois de a stream do Redis expirar —
+// por isso o resultado também vem no `done`, íntegro, num único evento.
 func (s *Service) done(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher, content []byte) error {
 	bg, cancel := bookkeepingCtx(ctx)
 	defer cancel()
@@ -426,7 +431,7 @@ func (s *Service) done(ctx context.Context, aj dbgen.AiJob, pub *stream.Publishe
 		return err
 	}
 	metrics.AIJob(aj.Kind, "ok")
-	s.closeStream(bg, pub, stream.TypeDone, "")
+	s.closeStream(bg, pub, stream.TypeDone, string(content))
 	return nil
 }
 
