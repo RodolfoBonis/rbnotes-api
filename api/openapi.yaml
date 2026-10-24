@@ -351,8 +351,19 @@ paths:
       description: |
         Server-Sent Events. Eventos: `status`, `text`, `json` (parciais), `tool`, `ping`
         (heartbeat a cada 5 s), `done` e `error` (finais). Suporta `Last-Event-ID` para retomar.
-        O resultado estruturado chega pelos eventos `json`; o objeto final também é persistido
-        (e, quando é entidade, volta no próximo pull).
+
+        **Envelope.** O campo `data:` de TODO evento é um objeto JSON
+        `{"data": "<conteúdo>", "code": "<código opcional>"}`. O conteúdo real do evento está
+        sempre na chave interna `data` (uma string); `code` aparece em alguns `error`
+        (ex.: `stream_timeout`). O cliente precisa desembrulhar esse envelope antes de usar o
+        conteúdo — nunca tratar o envelope como o resultado.
+
+        **Resultado.** Os eventos `json` trazem o resultado estruturado em PEDAÇOS (o objeto
+        cresce aos poucos; servem para a UI de streaming). O evento final `done` carrega o
+        RESULTADO CANÔNICO COMPLETO (o mesmo JSON validado que é persistido): é a fonte da
+        verdade. Mesmo após a stream do Redis expirar, uma reconexão recebe o `done` com o
+        resultado (vindo de `ai_jobs.result`). Quando o resultado é uma entidade
+        (`note_ai`, `chat_message`), ele também volta no próximo `GET /sync/pull`.
       parameters:
         - name: id
           in: path

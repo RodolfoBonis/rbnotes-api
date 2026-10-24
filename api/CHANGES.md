@@ -55,3 +55,21 @@ registra as decisões que ajustaram/esclareceram o contrato v1 e o porquê.
     `code: "not_allowed"` e NÃO cria o registro em `users`. Em `APP_ENV=prod` com `AUTH_MODE=oidc`
     a API recusa subir sem a lista. Aditivo: nova resposta `403` documentada em todos os endpoints
     autenticados.
+
+## v1 — correção do stream de IA e do sync de note_ai (2026-10-23)
+
+11. **Evento `done` do SSE carrega o resultado canônico.** Antes o `done` ia com `data` vazio
+    (tanto no fechamento normal quanto no `streamFinalState`, quando a stream do Redis já havia
+    expirado). O resultado só existia em `ai_jobs.result` e, para entidades, no pull. Clientes que
+    tratavam os eventos `json` (ou o envelope) como o objeto final acabavam com um resultado vazio.
+    Agora o `done` leva o **resultado validado completo** num único evento (o mesmo JSON de
+    `ai_jobs.result`); os `json` parciais seguem existindo só para a UI de streaming. **Envelope:**
+    todo evento SSE tem `data:` = `{"data":"<conteúdo>","code"?:"<código>"}`; o cliente desembrulha
+    e só então usa o conteúdo. Aditivo (sem quebra para quem já desembrulhava e lia o `done`).
+
+12. **`POST /sync/push` recusa `note_ai` vivo sem conteúdo → `422 invalid_note_ai`.** Um `note_ai`
+    não-tombstone precisa ter `title` e `tldr` não vazios. Aceita as duas formas do contrato: o JSON
+    "bare" do enrich do servidor (`{"title":...,"tldr":...}`) e a do desktop (`{"noteId":...,`
+    `"aiJson":"{...}"}`). Protege o resumo correto do servidor de ser sobrescrito por LWW por um
+    cliente antigo que gravou `note_ai` vazio (bug do envelope SSE). Tombstones (`deleted:true`) são
+    sempre aceitos, inclusive com `data` vazio — usados para purgar dados de demo que vazaram.
