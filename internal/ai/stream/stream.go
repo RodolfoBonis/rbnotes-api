@@ -4,6 +4,10 @@
 // O worker publica pedaços (text/json), avisos (tool/status) e um evento final (done/error). A API lê
 // do início — ou do último id recebido (Last-Event-ID), para o browser reconectar sem perder nada.
 // A stream expira 1h após a última escrita: o resultado definitivo fica no Postgres.
+//
+// Notas CIFRADAS (efêmeras) usam um TTL curto (ephemeralTTL): os deltas carregam o texto claro sendo
+// gerado e o resultado NÃO fica no Postgres, então a stream some logo após o `done`/`error` — só o
+// suficiente para o cliente reconectar e consumir o evento final.
 package stream
 
 import (
@@ -27,8 +31,12 @@ const (
 )
 
 const (
-	ttl    = time.Hour
-	maxLen = 20000
+	ttl = time.Hour
+	// ephemeralTTL é o TTL da stream de uma nota CIFRADA. Cada escrita (deltas e o evento final)
+	// renova a expiração, então a stream vive enquanto a resposta flui e some ~60s após o done/error —
+	// tempo bastante para o cliente reconectar e ler o resultado, que não fica guardado em lugar nenhum.
+	ephemeralTTL = 60 * time.Second
+	maxLen       = 20000
 	// flushEvery agrega deltas pequenos (a CLI manda poucos caracteres por evento).
 	flushEvery = 120 * time.Millisecond
 )
@@ -51,6 +59,7 @@ func (e Event) Final() bool { return e.Type == TypeDone || e.Type == TypeError }
 type Publisher struct {
 	rdb *redis.Client
 	key string
+	ttl time.Duration
 
 	mu      sync.Mutex
 	pending strings.Builder
@@ -59,9 +68,21 @@ type Publisher struct {
 	err     error
 }
 
+// Option configura o Publisher.
+type Option func(*Publisher)
+
+// Ephemeral marca a stream como de nota CIFRADA: usa ephemeralTTL em toda escrita, então os deltas e
+// o evento final expiram ~60s após a última escrita (sem resultado guardado fora do evento `done`).
+func Ephemeral() Option {
+	return func(p *Publisher) { p.ttl = ephemeralTTL }
+}
+
 // NewPublisher abre a stream da resposta id. Uma nova geração (regenerar) começa do zero.
-func NewPublisher(ctx context.Context, rdb *redis.Client, id string) *Publisher {
-	p := &Publisher{rdb: rdb, key: Key(id)}
+func NewPublisher(ctx context.Context, rdb *redis.Client, id string, opts ...Option) *Publisher {
+	p := &Publisher{rdb: rdb, key: Key(id), ttl: ttl}
+	for _, o := range opts {
+		o(p)
+	}
 	p.err = rdb.Del(ctx, p.key).Err()
 	return p
 }
@@ -114,7 +135,7 @@ func (p *Publisher) flushLocked(ctx context.Context) {
 func (p *Publisher) addLocked(ctx context.Context, typ, data string) {
 	pipe := p.rdb.TxPipeline()
 	pipe.XAdd(ctx, &redis.XAddArgs{Stream: p.key, MaxLen: maxLen, Approx: true, Values: map[string]any{"t": typ, "d": data}})
-	pipe.Expire(ctx, p.key, ttl)
+	pipe.Expire(ctx, p.key, p.ttl)
 	if _, err := pipe.Exec(ctx); err != nil && p.err == nil {
 		p.err = err
 	}

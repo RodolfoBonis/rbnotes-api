@@ -54,6 +54,10 @@ type Request struct {
 	ResumeID string
 	// Workdir é o cwd da CLI. As sessões do --resume são guardadas por cwd: retomar exige o mesmo.
 	Workdir string
+	// HomeDir, quando não-vazio, substitui o HOME do runner SÓ nesta execução. A CLI grava a sessão
+	// em $HOME/.claude/projects/<cwd>; um HOME temporário isola a sessão de uma nota CIFRADA do
+	// PVC persistente (apagado pelo chamador no fim). Vazio = usa o HOME estável do runner.
+	HomeDir string
 	// AllowedTools é, ao mesmo tempo, o CONJUNTO de ferramentas exposto ao modelo (--tools) e a
 	// allowlist do que roda sem confirmação (--allowedTools): os dois ficam alinhados. Vazio =
 	// nenhuma ferramenta além da StructuredOutput do --json-schema.
@@ -129,7 +133,7 @@ func (r *Runner) Run(ctx context.Context, req Request, onEvent func(Event)) (Res
 	cmd := exec.CommandContext(ctx, r.bin, r.buildArgs(req)...) //nolint:gosec // G204: bin é config; args fixos; o prompt vai por stdin.
 	cmd.Dir = req.Workdir
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	cmd.Env = r.minimalEnv()
+	cmd.Env = r.minimalEnv(req.HomeDir)
 	setProcessGroup(cmd)
 
 	var stderr strings.Builder
@@ -201,16 +205,20 @@ func (r *Runner) buildArgs(req Request) []string {
 	return args
 }
 
-// minimalEnv: allowlist, sem os.Environ() (que vazaria os segredos do worker para a CLI).
-func (r *Runner) minimalEnv() []string {
+// minimalEnv: allowlist, sem os.Environ() (que vazaria os segredos do worker para a CLI). home
+// substitui o HOME do runner quando não-vazio (sessão isolada de nota cifrada num HOME temporário).
+func (r *Runner) minimalEnv(home string) []string {
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
 		"CLAUDE_CODE_OAUTH_TOKEN=" + r.oauthToken, // SEGREDO: nunca logado.
 		"DISABLE_AUTOUPDATER=1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 	}
-	if r.home != "" {
-		env = append(env, "HOME="+r.home)
+	if home == "" {
+		home = r.home
+	}
+	if home != "" {
+		env = append(env, "HOME="+home)
 	}
 	for _, key := range []string{"LANG", "TMPDIR"} {
 		if v := os.Getenv(key); v != "" {

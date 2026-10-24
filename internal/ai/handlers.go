@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -91,13 +92,18 @@ func (s *Service) handleChat(ctx context.Context, aj dbgen.AiJob, pub *stream.Pu
 	if err := json.Unmarshal(aj.Input, &in); err != nil {
 		return s.fail(ctx, aj, pub, "input inválido")
 	}
+	allowed := startMsSet(in.Transcript)
+	// Nota CIFRADA: nada da conversa pode sobrar no PVC. Sem sessão, sem --resume, workdir e HOME
+	// temporários (a CLI grava a sessão em $HOME/.claude/projects/<cwd>), apagados no fim.
+	if in.Ephemeral {
+		return s.handleChatEphemeral(ctx, aj, pub, in, allowed)
+	}
 	resume := ""
 	if in.ThreadID != "" {
 		if sess, serr := s.q.GetThreadSession(ctx, dbgen.GetThreadSessionParams{UserID: aj.UserID, ThreadID: in.ThreadID}); serr == nil {
 			resume = sess
 		}
 	}
-	allowed := startMsSet(in.Transcript)
 	workdir := s.dir("chat", uuidString(aj.UserID), safeDir(in.ThreadID))
 
 	req := claude.Request{Prompt: chatPrompt(in.Message, nil, in.Transcript, resume != ""), JSONSchema: NoteChatSchema, Workdir: workdir, ResumeID: resume}
@@ -127,14 +133,47 @@ func (s *Service) handleChat(ctx context.Context, aj dbgen.AiJob, pub *stream.Pu
 			s.logger.Warn("ai: gravar sessão falhou", "err", serr.Error())
 		}
 	}
-	if in.Ephemeral {
-		return s.doneEphemeral(ctx, aj, pub, content)
-	}
 	msg := chatMessageData(in.ThreadID, content)
 	if err := s.writeEntity(ctx, aj.UserID, "chat_message", uuidString(aj.ID), msg); err != nil {
 		return err
 	}
 	return s.done(ctx, aj, pub, content)
+}
+
+// handleChatEphemeral responde ao chat de uma nota CIFRADA SEM deixar rastro no PVC: workdir e HOME
+// temporários (a sessão da CLI mora em $HOME/.claude/projects/<cwd>), ambos apagados no fim mesmo em
+// erro/timeout; nenhuma sessão é persistida nem --resume é usado. O histórico recente (in.History) vem
+// do cliente embutido no prompt. O resultado volta só no `done` do SSE e input/result são limpos.
+func (s *Service) handleChatEphemeral(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher, in ChatInput, allowed map[int64]bool) error {
+	base := s.dir("tmp")
+	workdir, err := os.MkdirTemp(base, "chat-")
+	if err != nil {
+		return s.fail(ctx, aj, pub, "workdir temporário: "+err.Error())
+	}
+	defer func() { _ = os.RemoveAll(workdir) }()
+	home, err := os.MkdirTemp(base, "home-")
+	if err != nil {
+		return s.fail(ctx, aj, pub, "HOME temporário: "+err.Error())
+	}
+	defer func() { _ = os.RemoveAll(home) }()
+
+	req := claude.Request{
+		Prompt:     chatPrompt(in.Message, in.History, in.Transcript, false),
+		JSONSchema: NoteChatSchema,
+		Workdir:    workdir,
+		HomeDir:    home,
+	}
+	res, rerr := s.runner.Run(ctx, withDefaults(req, aj, systemPrompt), forward(ctx, pub))
+	if rerr == nil {
+		s.recordUsage(ctx, aj, res)
+	}
+	content, derr := s.finishRun(ctx, aj, pub, res, rerr, func(raw []byte) ([]byte, error) {
+		return ValidateChat(raw, allowed)
+	})
+	if content == nil {
+		return derr
+	}
+	return s.doneEphemeral(ctx, aj, pub, content)
 }
 
 // handleAsk busca candidatas por FTS + recência e responde com fontes só dentre elas.

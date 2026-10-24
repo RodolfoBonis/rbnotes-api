@@ -25,16 +25,23 @@ const (
 func (s *Service) ReapStuckJobs(ctx context.Context) (int, error) {
 	const msg = "A IA não conseguiu concluir o pedido (o processamento foi interrompido). Tente de novo."
 	cutoff := pgtype.Timestamptz{Time: time.Now().Add(-stuckJobTimeout), Valid: true}
-	ids, err := s.q.ReapStuckAIJobs(ctx, dbgen.ReapStuckAIJobsParams{UpdatedAt: cutoff, Error: msg})
+	rows, err := s.q.ReapStuckAIJobs(ctx, dbgen.ReapStuckAIJobsParams{UpdatedAt: cutoff, Error: msg})
 	if err != nil {
 		return 0, fmt.Errorf("ai: reaper: %w", err)
 	}
-	for _, id := range ids {
-		if s.rdb != nil {
-			s.closeStream(ctx, stream.NewPublisher(ctx, s.rdb, uuidString(id)), stream.TypeError, msg)
+	for _, row := range rows {
+		if s.rdb == nil {
+			continue
 		}
+		// Job CIFRADO: fecha a stream com TTL curto (os deltas carregam texto claro e o reaper já
+		// esvaziou input/result no banco).
+		var opts []stream.Option
+		if row.Ephemeral {
+			opts = append(opts, stream.Ephemeral())
+		}
+		s.closeStream(ctx, stream.NewPublisher(ctx, s.rdb, uuidString(row.ID), opts...), stream.TypeError, msg)
 	}
-	return len(ids), nil
+	return len(rows), nil
 }
 
 // Cleanup faz o housekeeping: apaga jobs terminais antigos da fila e purga os dados pesados antigos
@@ -53,6 +60,11 @@ func (s *Service) Cleanup(ctx context.Context) error {
 	}
 	if err := s.q.ClearOldAIJobData(ctx, cutoff); err != nil {
 		return fmt.Errorf("ai: limpar ai_jobs: %w", err)
+	}
+	// Rede de segurança: nenhum input de nota CIFRADA (efêmera) pode sobreviver em claro, mesmo antes
+	// do cutoff de retenção.
+	if err := s.q.ClearEphemeralAIJobData(ctx); err != nil {
+		return fmt.Errorf("ai: limpar ai_jobs efêmeros: %w", err)
 	}
 	return nil
 }

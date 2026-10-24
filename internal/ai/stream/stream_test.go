@@ -66,3 +66,25 @@ func TestTimerFlush(t *testing.T) {
 	require.Len(t, evs, 1, "o delta sai sozinho após o intervalo de agregação")
 	require.Equal(t, "Olá", evs[0].Data)
 }
+
+// TestEphemeralTTLIsShort: uma stream efêmera (nota CIFRADA) expira em ~60s, não em 1h — os deltas
+// carregam texto claro e o resultado não fica no Postgres, então a stream some logo após o done.
+func TestEphemeralTTLIsShort(t *testing.T) {
+	rdb := testsupport.NewRedis(t)
+	ctx := context.Background()
+
+	p := stream.NewPublisher(ctx, rdb, "eph1", stream.Ephemeral())
+	p.Emit(ctx, stream.TypeJSON, `{"title":"segredo"}`)
+	require.NoError(t, p.Close(ctx, stream.TypeDone, `{"title":"segredo"}`))
+
+	ttl, err := rdb.TTL(ctx, stream.Key("eph1")).Result()
+	require.NoError(t, err)
+	require.Greater(t, ttl, time.Duration(0), "a stream ainda existe para o cliente reconectar")
+	require.LessOrEqual(t, ttl, 60*time.Second, "mas expira em ~60s, não em 1h")
+
+	// Os deltas compartilham a mesma chave: expiram junto com o evento final.
+	evs, err := stream.Read(ctx, rdb, "eph1", "0", 100*time.Millisecond)
+	require.NoError(t, err)
+	require.Len(t, evs, 2)
+	require.True(t, evs[1].Final())
+}

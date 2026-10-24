@@ -156,8 +156,11 @@ type ChatInput struct {
 	Message    string    `json:"message"`
 	Transcript []Segment `json:"transcript"`
 	Model      string    `json:"model"`
-	// Ephemeral marca uma nota CIFRADA: o worker não grava a entidade chat_message em texto claro; o
-	// resultado volta só no `done` do SSE e o input/result do ai_jobs é limpo no fim.
+	// History é o histórico recente da conversa (do cliente). Usado SÓ no chat EFÊMERO, onde não há
+	// sessão persistida nem --resume: entra embutido no prompt para dar contexto ao modelo.
+	History []ChatTurn `json:"history"`
+	// Ephemeral marca uma nota CIFRADA: o worker não grava a entidade chat_message em texto claro, não
+	// persiste sessão nem usa --resume, roda em workdir/HOME temporários e limpa input/result no fim.
 	Ephemeral bool `json:"ephemeral"`
 }
 
@@ -390,7 +393,14 @@ func (s *Service) Handle(ctx context.Context, job queue.Job) error {
 	if err := s.q.SetAIJobRunning(ctx, id); err != nil {
 		return fmt.Errorf("ai: marcar running: %w", err)
 	}
-	pub := stream.NewPublisher(ctx, s.rdb, p.JobID)
+	// Nota CIFRADA (efêmera): a stream carrega texto claro (deltas) e o resultado não fica no Postgres,
+	// então usa TTL curto (some ~60s após done/error, só o bastante para o cliente reconectar).
+	var pub *stream.Publisher
+	if isEphemeral(aj) {
+		pub = stream.NewPublisher(ctx, s.rdb, p.JobID, stream.Ephemeral())
+	} else {
+		pub = stream.NewPublisher(ctx, s.rdb, p.JobID)
+	}
 	switch aj.Kind {
 	case KindEnrich:
 		return s.handleEnrich(ctx, aj, pub)
@@ -486,7 +496,13 @@ func (s *Service) fail(ctx context.Context, aj dbgen.AiJob, pub *stream.Publishe
 	msg := userMessage(cause)
 	bg, cancel := bookkeepingCtx(ctx)
 	defer cancel()
-	if err := s.q.FailAIJob(bg, dbgen.FailAIJobParams{ID: aj.ID, Error: msg}); err != nil {
+	// Nota CIFRADA: além de marcar o erro, esvazia input/result ({}) — a transcrição em claro não pode
+	// sobrar em ai_jobs.input numa falha.
+	if isEphemeral(aj) {
+		if err := s.q.FailAIJobEphemeral(bg, dbgen.FailAIJobEphemeralParams{ID: aj.ID, Error: msg}); err != nil {
+			s.logger.ErrorContext(bg, "ai: marcar job efêmero como erro falhou", slog.String("job_id", uuidString(aj.ID)), slog.String("err", err.Error()))
+		}
+	} else if err := s.q.FailAIJob(bg, dbgen.FailAIJobParams{ID: aj.ID, Error: msg}); err != nil {
 		s.logger.ErrorContext(bg, "ai: marcar job como erro falhou", slog.String("job_id", uuidString(aj.ID)), slog.String("err", err.Error()))
 	}
 	s.closeStream(bg, pub, stream.TypeError, msg)
@@ -537,6 +553,20 @@ func (s *Service) rateLimited(ctx context.Context, aj dbgen.AiJob, pub *stream.P
 	if retryAt.IsZero() || retryAt.Before(time.Now()) {
 		retryAt = time.Now().Add(rateLimitRequeue)
 	}
+	// Nota CIFRADA: NÃO reagenda. Um requeue manteria a transcrição em claro em ai_jobs.input durante
+	// toda a espera (dezenas de minutos, renováveis a cada novo limite). Em vez disso, esvazia
+	// input/result, encerra a stream e falha em definitivo; o cliente, que tem o texto localmente,
+	// refaz o pedido quando quiser.
+	if isEphemeral(aj) {
+		const msg = "Limite de uso da IA atingido. Tente de novo mais tarde."
+		bg, cancel := bookkeepingCtx(ctx)
+		defer cancel()
+		if err := s.q.FailAIJobEphemeral(bg, dbgen.FailAIJobEphemeralParams{ID: aj.ID, Error: msg}); err != nil {
+			s.logger.ErrorContext(bg, "ai: limpar job efêmero no limite de uso falhou", slog.String("job_id", uuidString(aj.ID)), slog.String("err", err.Error()))
+		}
+		s.closeStream(bg, pub, stream.TypeError, msg)
+		return queue.Permanent(errors.New("ai: limite de uso (efêmero)"))
+	}
 	s.closeStream(ctx, pub, stream.TypeStatus, "Limite de uso da IA atingido — nova tentativa às "+retryAt.Local().Format("15:04"))
 	return queue.RetryAfter(errors.New("ai: limite de uso"), retryAt)
 }
@@ -555,6 +585,19 @@ func (s *Service) giveUp(ctx context.Context, job queue.Job) {
 	}
 	bg, cancel := bookkeepingCtx(ctx)
 	defer cancel()
+	// Carrega o job para saber se é CIFRADO: nesse caso esvazia input/result ({}) e fecha a stream com
+	// TTL curto. Se não der para carregar, trata como não-efêmero (só marca o erro).
+	ephemeral := false
+	if aj, gerr := s.q.GetAIJob(bg, id); gerr == nil {
+		ephemeral = isEphemeral(aj)
+	}
+	if ephemeral {
+		if err := s.q.FailAIJobEphemeral(bg, dbgen.FailAIJobEphemeralParams{ID: id, Error: msg}); err != nil {
+			s.logger.ErrorContext(bg, "ai: giveUp FailAIJobEphemeral falhou", slog.String("job_id", p.JobID), slog.String("err", err.Error()))
+		}
+		s.closeStream(bg, stream.NewPublisher(bg, s.rdb, p.JobID, stream.Ephemeral()), stream.TypeError, msg)
+		return
+	}
 	if err := s.q.FailAIJob(bg, dbgen.FailAIJobParams{ID: id, Error: msg}); err != nil {
 		s.logger.ErrorContext(bg, "ai: giveUp FailAIJob falhou", slog.String("job_id", p.JobID), slog.String("err", err.Error()))
 	}
@@ -574,6 +617,16 @@ func bookkeepingCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 // closeStream fecha a stream publicando o evento final e LOGA a falha (antes era silenciosa).
+// isEphemeral indica se o job é de uma nota CIFRADA (campo "ephemeral" do input). Só note_enrich e
+// note_chat têm esse campo; nos demais kinds o input não o traz e o resultado é false.
+func isEphemeral(aj dbgen.AiJob) bool {
+	var probe struct {
+		Ephemeral bool `json:"ephemeral"`
+	}
+	_ = json.Unmarshal(aj.Input, &probe)
+	return probe.Ephemeral
+}
+
 func (s *Service) closeStream(ctx context.Context, pub *stream.Publisher, typ, data string) {
 	if pub == nil {
 		return

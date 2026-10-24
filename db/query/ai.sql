@@ -17,6 +17,13 @@ WHERE id = $1;
 -- name: FailAIJob :exec
 UPDATE ai_jobs SET status = 'error', error = $2, updated_at = now() WHERE id = $1;
 
+-- FailAIJobEphemeral marca como erro um job EFÊMERO (nota cifrada) e esvazia input/result ({}): a
+-- transcrição em claro não pode sobrar em ai_jobs.input numa falha. Usado em fail/giveUp/reaper e no
+-- limite de uso (que, para efêmero, encerra em vez de reagendar). O consumo registrado é preservado.
+-- name: FailAIJobEphemeral :exec
+UPDATE ai_jobs SET status = 'error', error = $2, input = '{}'::jsonb, result = '{}'::jsonb, updated_at = now()
+WHERE id = $1;
+
 -- ── cota diária ─────────────────────────────────────────────────────────────────────────
 -- name: CountAIRequestsSince :one
 SELECT count(*) FROM ai_requests WHERE user_id = $1 AND created_at >= $2;
@@ -30,14 +37,28 @@ INSERT INTO ai_requests (user_id, kind) VALUES ($1, $2);
 SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0));
 
 -- ReapStuckAIJobs marca como erro os ai_jobs presos (queued/running há mais de $1) que NÃO têm mais
--- um job vivo na fila (worker morreu sem fechar a stream). Devolve os ids para fechar as streams.
+-- um job vivo na fila (worker morreu sem fechar a stream). Para jobs EFÊMEROS (nota cifrada) também
+-- esvazia input/result ({}), para não deixar transcrição em claro. Devolve id + ephemeral (para o
+-- reaper fechar a stream com o TTL curto de efêmero).
 -- name: ReapStuckAIJobs :many
-UPDATE ai_jobs SET status = 'error', error = $2, updated_at = now()
-WHERE status IN ('queued', 'running') AND ai_jobs.updated_at < $1
-  AND NOT EXISTS (
-      SELECT 1 FROM jobs j
-      WHERE j.payload->>'job_id' = ai_jobs.id::text AND j.status IN ('queued', 'running'))
-RETURNING id;
+WITH stuck AS (
+    SELECT id, COALESCE(input->>'ephemeral', '') = 'true' AS ephemeral
+    FROM ai_jobs
+    WHERE status IN ('queued', 'running') AND ai_jobs.updated_at < $1
+      AND NOT EXISTS (
+          SELECT 1 FROM jobs j
+          WHERE j.payload->>'job_id' = ai_jobs.id::text AND j.status IN ('queued', 'running'))
+    FOR UPDATE
+)
+UPDATE ai_jobs a SET
+    status     = 'error',
+    error      = $2,
+    input      = CASE WHEN s.ephemeral THEN '{}'::jsonb ELSE a.input END,
+    result     = CASE WHEN s.ephemeral THEN '{}'::jsonb ELSE a.result END,
+    updated_at = now()
+FROM stuck s
+WHERE a.id = s.id
+RETURNING a.id, s.ephemeral;
 
 -- DeleteOldAIRequests apaga os registros de cota mais antigos que o cutoff (retenção).
 -- name: DeleteOldAIRequests :exec
@@ -47,6 +68,16 @@ DELETE FROM ai_requests WHERE created_at < $1;
 -- name: ClearOldAIJobData :exec
 UPDATE ai_jobs SET input = '{}'::jsonb, result = NULL
 WHERE updated_at < $1 AND (input <> '{}'::jsonb OR result IS NOT NULL);
+
+-- ClearEphemeralAIJobData é a rede de segurança da retenção para notas CIFRADAS: esvazia input/result
+-- ({}) de QUALQUER job efêmero já terminal (done/error) que ainda tenha texto claro, sem esperar o
+-- cutoff de retenção. Em operação normal o input já é limpo no fim (doneEphemeral/FailAIJobEphemeral);
+-- isto garante que nenhuma transcrição de efêmero sobreviva caso algum caminho escape.
+-- name: ClearEphemeralAIJobData :exec
+UPDATE ai_jobs SET input = '{}'::jsonb, result = '{}'::jsonb
+WHERE status IN ('done', 'error')
+  AND COALESCE(input->>'ephemeral', '') = 'true'
+  AND (input <> '{}'::jsonb OR result IS DISTINCT FROM '{}'::jsonb);
 
 -- ── chat threads (--resume) ─────────────────────────────────────────────────────────────
 -- name: GetThreadSession :one

@@ -106,3 +106,29 @@ registra as decisões que ajustaram/esclareceram o contrato v1 e o porquê.
     notas recentes do índice como contexto (as cifradas ficam de fora, pois não entram no
     `note_search`), com saída estruturada estrita (`WeeklySummary`): `title`, `summary`,
     `highlights`, `openTasks[]` (com `noteId` restrito às notas conhecidas) e `themes[]`.
+
+## Fase 3 — fechamento de vazamentos de notas cifradas (2026-10-24)
+
+17. **Stream efêmera com TTL curto (~60s).** A stream SSE de um job `ephemeral` (nota cifrada)
+    passou a expirar ~60s após a última escrita, não em 1h: os deltas `json`/`text` carregam o
+    texto claro sendo gerado e o resultado **não** fica no Postgres (`ai_jobs.result = {}`), então a
+    stream some logo após o `done`/`error` — tempo suficiente só para o cliente reconectar e
+    consumir o evento final. Como é uma única chave Redis, os deltas expiram junto. Jobs
+    não-efêmeros seguem com 1h (resultado canônico fica no banco). Sem mudança de contrato SSE.
+
+18. **Falha de job efêmero limpa `input` (transcrição) e `result`.** Antes, um `fail` de job
+    cifrado só chamava `FailAIJob`, deixando a transcrição em claro em `ai_jobs.input`. Agora há
+    `FailAIJobEphemeral` (zera `input`/`result` para `{}`), usado em `fail`, `giveUp` e no reaper
+    (`ReapStuckAIJobs`, que também esvazia efêmeros no mesmo UPDATE). No **limite de uso**, um job
+    efêmero **não é reagendado** (um requeue manteria a transcrição em claro durante toda a espera):
+    `input`/`result` são limpos e o pedido falha em definitivo — o cliente, que tem o texto
+    localmente, refaz quando quiser. A retenção (`Cleanup`) ganhou `ClearEphemeralAIJobData` como
+    rede de segurança: nenhum `input` de efêmero terminal sobrevive em claro, mesmo antes do cutoff.
+
+19. **Chat efêmero não persiste sessão nem usa `--resume`.** Antes o chat cifrado gravava
+    `UpsertThreadSession` e rodava no workdir persistente `chat/<user>/<thread>`, e a CLI guardava o
+    histórico da conversa em `$HOME/.claude/projects/...` no PVC. Agora o chat `ephemeral` roda em um
+    **workdir e um HOME temporários** (`os.MkdirTemp` em `AI_WORKDIR/tmp`), ambos apagados ao fim
+    (inclusive em erro/timeout), **sem** gravar sessão nem usar `--resume`. O histórico recente da
+    conversa, quando enviado pelo cliente em `history: [{role, content}]`, vai embutido no prompt
+    (campo **aditivo** de `POST /ai/notes/{id}/chat`; usado só no caminho efêmero).

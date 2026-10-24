@@ -92,6 +92,22 @@ func (q *Queries) AIUsageByDay(ctx context.Context, arg AIUsageByDayParams) ([]A
 	return items, nil
 }
 
+const clearEphemeralAIJobData = `-- name: ClearEphemeralAIJobData :exec
+UPDATE ai_jobs SET input = '{}'::jsonb, result = '{}'::jsonb
+WHERE status IN ('done', 'error')
+  AND COALESCE(input->>'ephemeral', '') = 'true'
+  AND (input <> '{}'::jsonb OR result IS DISTINCT FROM '{}'::jsonb)
+`
+
+// ClearEphemeralAIJobData é a rede de segurança da retenção para notas CIFRADAS: esvazia input/result
+// ({}) de QUALQUER job efêmero já terminal (done/error) que ainda tenha texto claro, sem esperar o
+// cutoff de retenção. Em operação normal o input já é limpo no fim (doneEphemeral/FailAIJobEphemeral);
+// isto garante que nenhuma transcrição de efêmero sobreviva caso algum caminho escape.
+func (q *Queries) ClearEphemeralAIJobData(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, clearEphemeralAIJobData)
+	return err
+}
+
 const clearOldAIJobData = `-- name: ClearOldAIJobData :exec
 UPDATE ai_jobs SET input = '{}'::jsonb, result = NULL
 WHERE updated_at < $1 AND (input <> '{}'::jsonb OR result IS NOT NULL)
@@ -243,6 +259,24 @@ func (q *Queries) FailAIJob(ctx context.Context, arg FailAIJobParams) error {
 	return err
 }
 
+const failAIJobEphemeral = `-- name: FailAIJobEphemeral :exec
+UPDATE ai_jobs SET status = 'error', error = $2, input = '{}'::jsonb, result = '{}'::jsonb, updated_at = now()
+WHERE id = $1
+`
+
+type FailAIJobEphemeralParams struct {
+	ID    pgtype.UUID
+	Error string
+}
+
+// FailAIJobEphemeral marca como erro um job EFÊMERO (nota cifrada) e esvazia input/result ({}): a
+// transcrição em claro não pode sobrar em ai_jobs.input numa falha. Usado em fail/giveUp/reaper e no
+// limite de uso (que, para efêmero, encerra em vez de reagendar). O consumo registrado é preservado.
+func (q *Queries) FailAIJobEphemeral(ctx context.Context, arg FailAIJobEphemeralParams) error {
+	_, err := q.db.Exec(ctx, failAIJobEphemeral, arg.ID, arg.Error)
+	return err
+}
+
 const getAIJob = `-- name: GetAIJob :one
 SELECT id, user_id, kind, status, note_id, thread_id, model, input, result, error, created_at, updated_at, cost_usd, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, duration_ms, num_turns, resolved_model FROM ai_jobs WHERE id = $1
 `
@@ -318,12 +352,24 @@ func (q *Queries) LockUserForQuota(ctx context.Context, dollar_1 string) error {
 }
 
 const reapStuckAIJobs = `-- name: ReapStuckAIJobs :many
-UPDATE ai_jobs SET status = 'error', error = $2, updated_at = now()
-WHERE status IN ('queued', 'running') AND ai_jobs.updated_at < $1
-  AND NOT EXISTS (
-      SELECT 1 FROM jobs j
-      WHERE j.payload->>'job_id' = ai_jobs.id::text AND j.status IN ('queued', 'running'))
-RETURNING id
+WITH stuck AS (
+    SELECT id, COALESCE(input->>'ephemeral', '') = 'true' AS ephemeral
+    FROM ai_jobs
+    WHERE status IN ('queued', 'running') AND ai_jobs.updated_at < $1
+      AND NOT EXISTS (
+          SELECT 1 FROM jobs j
+          WHERE j.payload->>'job_id' = ai_jobs.id::text AND j.status IN ('queued', 'running'))
+    FOR UPDATE
+)
+UPDATE ai_jobs a SET
+    status     = 'error',
+    error      = $2,
+    input      = CASE WHEN s.ephemeral THEN '{}'::jsonb ELSE a.input END,
+    result     = CASE WHEN s.ephemeral THEN '{}'::jsonb ELSE a.result END,
+    updated_at = now()
+FROM stuck s
+WHERE a.id = s.id
+RETURNING a.id, s.ephemeral
 `
 
 type ReapStuckAIJobsParams struct {
@@ -331,21 +377,28 @@ type ReapStuckAIJobsParams struct {
 	Error     string
 }
 
+type ReapStuckAIJobsRow struct {
+	ID        pgtype.UUID
+	Ephemeral bool
+}
+
 // ReapStuckAIJobs marca como erro os ai_jobs presos (queued/running há mais de $1) que NÃO têm mais
-// um job vivo na fila (worker morreu sem fechar a stream). Devolve os ids para fechar as streams.
-func (q *Queries) ReapStuckAIJobs(ctx context.Context, arg ReapStuckAIJobsParams) ([]pgtype.UUID, error) {
+// um job vivo na fila (worker morreu sem fechar a stream). Para jobs EFÊMEROS (nota cifrada) também
+// esvazia input/result ({}), para não deixar transcrição em claro. Devolve id + ephemeral (para o
+// reaper fechar a stream com o TTL curto de efêmero).
+func (q *Queries) ReapStuckAIJobs(ctx context.Context, arg ReapStuckAIJobsParams) ([]ReapStuckAIJobsRow, error) {
 	rows, err := q.db.Query(ctx, reapStuckAIJobs, arg.UpdatedAt, arg.Error)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []pgtype.UUID{}
+	items := []ReapStuckAIJobsRow{}
 	for rows.Next() {
-		var id pgtype.UUID
-		if err := rows.Scan(&id); err != nil {
+		var i ReapStuckAIJobsRow
+		if err := rows.Scan(&i.ID, &i.Ephemeral); err != nil {
 			return nil, err
 		}
-		items = append(items, id)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
