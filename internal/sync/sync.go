@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -66,6 +67,10 @@ var (
 	ErrInvalidID = errors.New("sync: id inválido")
 	// ErrBadCursor: parâmetro since/cursor malformado.
 	ErrBadCursor = errors.New("sync: cursor inválido")
+	// ErrInvalidNoteAi: push de note_ai vivo (não-tombstone) sem conteúdo (title/tldr). Protege um
+	// resumo bom no servidor de ser sobrescrito por um cliente antigo que calculou o resumo errado
+	// e gravou um note_ai vazio (ver o bug do envelope SSE no desktop).
+	ErrInvalidNoteAi = errors.New("sync: note_ai sem title/tldr")
 )
 
 // Change é uma mudança de uma entidade (contrato camelCase com o desktop).
@@ -120,6 +125,12 @@ func (s *Service) Push(ctx context.Context, userID pgtype.UUID, changes []Change
 		}
 		if ch.ID == "" || len(ch.ID) > maxEntityIDLen {
 			return res, fmt.Errorf("%w: %q", ErrInvalidID, ch.ID)
+		}
+		// note_ai vivo precisa de conteúdo mínimo (title+tldr). Um note_ai vazio nunca é um resumo
+		// legítimo; aceitar sobrescreveria por LWW o resumo correto gerado no servidor. Tombstones
+		// (deleted) são sempre aceitos.
+		if ch.Entity == EntityNoteAi && !ch.Deleted && !noteAiHasContent(ch.Data) {
+			return res, fmt.Errorf("%w: id %q", ErrInvalidNoteAi, ch.ID)
 		}
 		// Relógio do cliente adiantado demais: limita o updatedAt a now()+skew para não vencer o
 		// LWW para sempre.
@@ -330,6 +341,40 @@ func upsertEntity(ctx context.Context, q *dbgen.Queries, entity string, userID p
 		return fmt.Errorf("sync: upsert %s: %w", entity, err)
 	}
 	return nil
+}
+
+// noteAiHasContent indica se o data de um note_ai tem conteúdo mínimo (title e tldr não vazios).
+// Aceita as duas formas que circulam no contrato: o JSON "bare" do enrich do servidor
+// (`{"title":...,"tldr":...}`) e a forma do desktop que embrulha o resumo numa string
+// (`{"noteId":...,"aiJson":"{\"title\":...}"}`).
+func noteAiHasContent(data []byte) bool {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return false
+	}
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(data, &outer); err != nil {
+		return false
+	}
+	// Forma do desktop: o resumo vem como string JSON em "aiJson".
+	if raw, ok := outer["aiJson"]; ok {
+		var inner string
+		if json.Unmarshal(raw, &inner) == nil {
+			return jsonHasTitleTldr([]byte(inner))
+		}
+	}
+	return jsonHasTitleTldr(data)
+}
+
+// jsonHasTitleTldr decodifica um objeto e exige title e tldr não vazios.
+func jsonHasTitleTldr(b []byte) bool {
+	var v struct {
+		Title string `json:"title"`
+		Tldr  string `json:"tldr"`
+	}
+	if json.Unmarshal(b, &v) != nil {
+		return false
+	}
+	return strings.TrimSpace(v.Title) != "" && strings.TrimSpace(v.Tldr) != ""
 }
 
 // canonicalJSON reescreve um documento JSON numa forma canônica (chaves ordenadas, sem espaços),

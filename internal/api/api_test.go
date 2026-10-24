@@ -115,3 +115,37 @@ func TestSyncValidation(t *testing.T) {
 	status, _ = do(t, srv, http.MethodGet, "/v1/sync/pull?since=0", "alice", "")
 	require.Equal(t, http.StatusOK, status)
 }
+
+// TestSyncRejectsEmptyNoteAi: o push recusa um note_ai vivo sem conteúdo (title/tldr) com 422, para
+// um cliente antigo (bug do envelope SSE) não sobrescrever por LWW o resumo correto do servidor.
+// Tombstones e note_ai com resumo real passam normalmente.
+func TestSyncRejectsEmptyNoteAi(t *testing.T) {
+	srv := newTestServer(t)
+	do(t, srv, http.MethodGet, "/v1/me", "alice", "")
+
+	// note_ai vivo com data vazia → 422.
+	bad := `{"changes":[{"entity":"note_ai","id":"n1","updatedAt":"2026-10-20T12:00:00Z","deleted":false,"data":{}}]}`
+	status, _ := do(t, srv, http.MethodPost, "/v1/sync/push", "alice", bad)
+	require.Equal(t, http.StatusUnprocessableEntity, status)
+
+	// note_ai (forma do desktop) com aiJson sem title/tldr → 422.
+	bad = `{"changes":[{"entity":"note_ai","id":"n1","updatedAt":"2026-10-20T12:00:00Z","deleted":false,"data":{"noteId":"n1","aiJson":"{\"title\":\"\",\"tldr\":\"\"}"}}]}`
+	status, _ = do(t, srv, http.MethodPost, "/v1/sync/push", "alice", bad)
+	require.Equal(t, http.StatusUnprocessableEntity, status)
+
+	// note_ai (forma do desktop) com resumo real → 200.
+	good := `{"changes":[{"entity":"note_ai","id":"n1","updatedAt":"2026-10-21T12:00:00Z","deleted":false,"data":{"noteId":"n1","aiJson":"{\"title\":\"Kickoff\",\"tldr\":\"Resumo bom\"}"}}]}`
+	status, body := do(t, srv, http.MethodPost, "/v1/sync/push", "alice", good)
+	require.Equal(t, http.StatusOK, status, body)
+	require.Contains(t, body, "n1")
+
+	// note_ai (forma bare do enrich do servidor) com título/tldr → 200.
+	bare := `{"changes":[{"entity":"note_ai","id":"n2","updatedAt":"2026-10-21T12:00:00Z","deleted":false,"data":{"title":"T","tldr":"R"}}]}`
+	status, body = do(t, srv, http.MethodPost, "/v1/sync/push", "alice", bare)
+	require.Equal(t, http.StatusOK, status, body)
+
+	// Tombstone de note_ai (deleted) com data vazia → 200 (purge de dados de demo vazados).
+	tomb := `{"changes":[{"entity":"note_ai","id":"n3","updatedAt":"2026-10-21T12:00:00Z","deleted":true,"data":{}}]}`
+	status, body = do(t, srv, http.MethodPost, "/v1/sync/push", "alice", tomb)
+	require.Equal(t, http.StatusOK, status, body)
+}

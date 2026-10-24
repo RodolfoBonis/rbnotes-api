@@ -30,6 +30,9 @@ func (h *Handlers) pushChanges(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, syncpkg.ErrInvalidID):
 		httperr.Write(w, r, httperr.Validation(err.Error()).WithCode("invalid_id"))
 		return
+	case errors.Is(err, syncpkg.ErrInvalidNoteAi):
+		httperr.Write(w, r, httperr.Validation(err.Error()).WithCode("invalid_note_ai"))
+		return
 	case err != nil:
 		writeInternal(w, r, err)
 		return
