@@ -292,3 +292,95 @@ func (h *Handlers) streamFinalState(w http.ResponseWriter, r *http.Request, id p
 	}
 	return nil, true
 }
+
+// weeklySummary — POST /ai/weekly-summary { weekStart, tz } → 202 + SSE.
+func (h *Handlers) weeklySummary(w http.ResponseWriter, r *http.Request) {
+	if !h.aiEnabled(w, r) {
+		return
+	}
+	var in ai.WeeklyInput
+	if !decodeBody(w, r, &in) {
+		return
+	}
+	job, err := h.ai.RequestWeeklySummary(r.Context(), currentUser(r).ID, in)
+	if err != nil {
+		h.writeAIRequestErr(w, r, err)
+		return
+	}
+	acceptedJob(w, job)
+}
+
+const (
+	// usageDefaultDays é a janela padrão (últimos 30 dias) de GET /ai/usage.
+	usageDefaultDays = 30
+	// usageMaxDays é o intervalo máximo aceito (inclusivo).
+	usageMaxDays = 366
+)
+
+// aiUsageConfigured: GET /ai/usage não usa SSE (não precisa de Redis), só do serviço de IA.
+func (h *Handlers) aiUsageConfigured(w http.ResponseWriter, r *http.Request) bool {
+	if h.ai == nil {
+		httperr.Write(w, r, httperr.New(httperr.KindNotImplemented, "IA indisponível", "a IA não está configurada"))
+		return false
+	}
+	return true
+}
+
+// aiUsage — GET /ai/usage?from=&to=&tz=: consumo de IA do usuário (totais, série diária por kind e
+// cota de 24 h). Datas inclusivas no fuso IANA informado (padrão UTC); padrão últimos 30 dias;
+// intervalo máximo de 366 dias. Escopo por usuário.
+func (h *Handlers) aiUsage(w http.ResponseWriter, r *http.Request) {
+	if !h.aiUsageConfigured(w, r) {
+		return
+	}
+	q := r.URL.Query()
+	tz := strings.TrimSpace(q.Get("tz"))
+	if tz == "" {
+		tz = "UTC"
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		httperr.Write(w, r, httperr.New(httperr.KindBadRequest, "Bad request", "tz deve ser um fuso IANA (ex.: America/Sao_Paulo)"))
+		return
+	}
+	now := time.Now().In(loc)
+	to := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	from := to.AddDate(0, 0, -(usageDefaultDays - 1))
+	if v := strings.TrimSpace(q.Get("from")); v != "" {
+		from, err = time.ParseInLocation("2006-01-02", v, loc)
+		if err != nil {
+			httperr.Write(w, r, httperr.New(httperr.KindBadRequest, "Bad request", "from deve ser YYYY-MM-DD"))
+			return
+		}
+	}
+	if v := strings.TrimSpace(q.Get("to")); v != "" {
+		to, err = time.ParseInLocation("2006-01-02", v, loc)
+		if err != nil {
+			httperr.Write(w, r, httperr.New(httperr.KindBadRequest, "Bad request", "to deve ser YYYY-MM-DD"))
+			return
+		}
+	}
+	if from.After(to) {
+		httperr.Write(w, r, httperr.New(httperr.KindBadRequest, "Bad request", "from não pode ser depois de to"))
+		return
+	}
+	// Número de dias inclusivo; o +12h absorve o deslocamento de DST entre duas meias-noites locais.
+	days := int((to.Sub(from)+12*time.Hour)/(24*time.Hour)) + 1
+	if days > usageMaxDays {
+		httperr.Write(w, r, httperr.New(httperr.KindBadRequest, "Bad request", fmt.Sprintf("intervalo máximo de %d dias", usageMaxDays)))
+		return
+	}
+	rep, err := h.ai.Usage(r.Context(), ai.UsageQuery{
+		UserID:   currentUser(r).ID,
+		TZ:       tz,
+		FromDate: from.Format("2006-01-02"),
+		ToDate:   to.Format("2006-01-02"),
+		FromTS:   from,
+		ToTS:     to.AddDate(0, 0, 1),
+	})
+	if err != nil {
+		writeInternal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}

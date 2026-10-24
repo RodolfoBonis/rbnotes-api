@@ -231,6 +231,21 @@ paths:
               schema: { $ref: "#/components/schemas/Problem" }
         "501": { $ref: "#/components/responses/NotImplemented" }
 
+    delete:
+      tags: [audio]
+      operationId: deleteNoteAudio
+      summary: Apaga o áudio da nota (idempotente)
+      description: |
+        Remove o áudio da nota e aborta o multipart em andamento, se houver. **Idempotente**: se o
+        objeto ou o upload não existirem, ainda responde `204`. Escopo por usuário.
+      responses:
+        "204":
+          description: Áudio apagado (ou já inexistente)
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
   /ai/notes/{id}/enrich:
     parameters:
       - $ref: "#/components/parameters/NoteId"
@@ -342,6 +357,61 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "501": { $ref: "#/components/responses/NotImplemented" }
+
+  /ai/weekly-summary:
+    post:
+      tags: [ai]
+      operationId: aiWeeklySummary
+      summary: Resumo da semana (assíncrono, 202 + SSE)
+      description: |
+        Gera o resumo da semana que começa em `weekStart` (segunda-feira, YYYY-MM-DD). As notas
+        cifradas ficam de fora. O resultado (schema `WeeklySummary`) volta pelo SSE `done`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WeeklyRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Validation" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  /ai/usage:
+    get:
+      tags: [ai]
+      operationId: aiUsage
+      summary: Consumo de IA (custo estimado, tokens, série diária e cota)
+      description: |
+        Consumo de IA do usuário no período `[from, to]` (datas inclusivas, YYYY-MM-DD) calculado no
+        fuso IANA `tz` (padrão `UTC`). Padrão: últimos 30 dias. Intervalo máximo: 366 dias. O custo é
+        SEMPRE estimativa (preço de API; o dono usa assinatura), por isso `costIsEstimate` é `true`.
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema: { type: string }
+        - name: to
+          in: query
+          required: false
+          schema: { type: string }
+        - name: tz
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Consumo agregado
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AiUsage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
 
   /ai/streams/{id}:
     get:
@@ -480,6 +550,11 @@ components:
         data:
           type: object
           additionalProperties: true
+          description: |
+            Modelo do cliente em JSON. Pode vir CIFRADO como `{ "enc": "v1", "nonce": "<b64>",
+            "ct": "<b64>" }` (nota bloqueada): o servidor guarda como está, não indexa no FTS e não
+            usa o conteúdo em `ask`/`diary_month`/`weekly_summary`. Um `note_ai` cifrado é aceito sem
+            exigir title/tldr.
     PushRequest:
       type: object
       required: [changes]
@@ -526,6 +601,7 @@ components:
         length: { type: string, enum: [curto, medio, longo] }
         model: { type: string, enum: [sonnet, opus, haiku] }
         extractTasks: { type: boolean }
+        ephemeral: { type: boolean, description: "Nota cifrada: resultado só no SSE; o servidor não persiste a entidade em texto claro nem indexa" }
     ChatRequest:
       type: object
       required: [message]
@@ -537,6 +613,7 @@ components:
           description: "Opcional; ancora as citações (atMs) aos trechos reais"
           items: { $ref: "#/components/schemas/Segment" }
         model: { type: string, enum: [sonnet, opus, haiku] }
+        ephemeral: { type: boolean, description: "Nota cifrada: resultado só no SSE; o servidor não persiste a entidade em texto claro" }
     AskRequest:
       type: object
       required: [question]
@@ -638,6 +715,95 @@ components:
             properties:
               noteId: { type: string }
               title: { type: string }
+    WeeklyRequest:
+      type: object
+      required: [weekStart]
+      properties:
+        weekStart: { type: string, description: "Segunda-feira da semana (YYYY-MM-DD)" }
+        tz: { type: string, description: "Fuso IANA (padrão UTC)" }
+        model: { type: string, enum: [sonnet, opus, haiku] }
+    WeeklySummary:
+      type: object
+      required: [title, summary, highlights, openTasks, themes]
+      properties:
+        title: { type: string }
+        summary: { type: string }
+        highlights:
+          type: array
+          items: { type: string }
+        openTasks:
+          type: array
+          items:
+            type: object
+            required: [text, noteId]
+            properties:
+              text: { type: string }
+              noteId: { type: string, description: "Id da nota de origem (dentre as conhecidas) ou vazio" }
+        themes:
+          type: array
+          items:
+            type: object
+            required: [name, count]
+            properties:
+              name: { type: string }
+              count: { type: integer }
+    AiUsage:
+      type: object
+      required: [from, to, tz, currency, costIsEstimate, quota, totals, byKind, days]
+      properties:
+        from: { type: string }
+        to: { type: string }
+        tz: { type: string }
+        currency: { type: string }
+        costIsEstimate: { type: boolean }
+        quota:
+          type: object
+          required: [limit, used24h]
+          properties:
+            limit: { type: integer }
+            used24h: { type: integer }
+        totals:
+          type: object
+          required: [requests, done, errors, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, costUsd, durationMs]
+          properties:
+            requests: { type: integer }
+            done: { type: integer }
+            errors: { type: integer }
+            inputTokens: { type: integer }
+            outputTokens: { type: integer }
+            cacheCreationTokens: { type: integer }
+            cacheReadTokens: { type: integer }
+            costUsd: { type: number }
+            durationMs: { type: integer }
+        byKind:
+          type: array
+          items:
+            type: object
+            required: [kind, requests, costUsd]
+            properties:
+              kind: { type: string }
+              requests: { type: integer }
+              costUsd: { type: number }
+        days:
+          type: array
+          items:
+            type: object
+            required: [date, requests, costUsd, kinds]
+            properties:
+              date: { type: string }
+              requests: { type: integer }
+              costUsd: { type: number }
+              kinds:
+                type: array
+                items:
+                  type: object
+                  required: [kind, requests, costUsd, inputTokens, outputTokens]
+                  properties:
+                    kind: { type: string }
+                    requests: { type: integer }
+                    costUsd: { type: number }
+                    inputTokens: { type: integer }
+                    outputTokens: { type: integer }
     Problem:
       type: object
       description: RFC 7807 (application/problem+json)

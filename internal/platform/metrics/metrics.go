@@ -31,6 +31,20 @@ var (
 		Help: "Execuções da IA, por tipo e resultado.",
 	}, []string{"kind", "result"})
 
+	// aiCost acumula o custo estimado da IA (USD) por tipo de pedido. É estimativa de preço de API
+	// (o dono usa assinatura); serve para visibilidade de consumo, não para faturamento.
+	aiCost = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ai_cost_usd_total",
+		Help: "Custo estimado da IA em USD (preço de API; o dono usa assinatura), por tipo de pedido.",
+	}, []string{"kind"})
+
+	// aiTokens acumula os tokens consumidos pela IA por tipo de pedido e tipo de token
+	// (input|output|cache_creation|cache_read).
+	aiTokens = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ai_tokens_total",
+		Help: "Tokens consumidos pela IA, por tipo de pedido e tipo de token.",
+	}, []string{"kind", "type"})
+
 	// httpRequests / httpDuration: tráfego da API por rota (padrão do chi, não o path cru — sem
 	// explosão de cardinalidade) e classe de status. A stream SSE da IA fica fora da latência.
 	httpRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -60,10 +74,11 @@ var (
 // Kinds de job de IA e resultados, usados para pré-inicializar os labels das métricas (aparecem com
 // 0 antes do primeiro evento, para alertas de ausência funcionarem).
 var (
-	aiKinds    = []string{"note_enrich", "note_chat", "ask", "collection_rule", "diary_month", "daily_prompt"}
-	aiResults  = []string{"ok", "error", "rate_limited"}
-	jobResults = []string{"ok", "retry", "dead", "rate_limited", "interrupted"}
-	deps       = []string{"redis", "minio"}
+	aiKinds     = []string{"note_enrich", "note_chat", "ask", "collection_rule", "diary_month", "daily_prompt", "weekly_summary"}
+	aiResults   = []string{"ok", "error", "rate_limited"}
+	aiTokenKind = []string{"input", "output", "cache_creation", "cache_read"}
+	jobResults  = []string{"ok", "retry", "dead", "rate_limited", "interrupted"}
+	deps        = []string{"redis", "minio"}
 )
 
 func init() {
@@ -71,7 +86,7 @@ func init() {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
-	registry.MustRegister(jobsProcessed, aiJobs, httpRequests, httpDuration, dependencyUp)
+	registry.MustRegister(jobsProcessed, aiJobs, aiCost, aiTokens, httpRequests, httpDuration, dependencyUp)
 
 	// Pré-inicialização dos labels: cada série nasce em 0, para um alerta de "métrica ausente" (ver
 	// RbNotesApiMetricsMissing) distinguir "sem tráfego" de "processo morto".
@@ -81,6 +96,10 @@ func init() {
 		}
 		for _, r := range jobResults {
 			jobsProcessed.WithLabelValues("ai_job", r)
+		}
+		aiCost.WithLabelValues(k)
+		for _, tk := range aiTokenKind {
+			aiTokens.WithLabelValues(k, tk)
 		}
 	}
 	for _, d := range deps {
@@ -105,6 +124,20 @@ func JobProcessed(kind, result string) {
 // AIJob registra uma execução da IA.
 func AIJob(kind, result string) {
 	aiJobs.WithLabelValues(kind, result).Inc()
+}
+
+// AICost acumula o custo estimado (USD) de uma execução de IA. Ignora valores não-positivos.
+func AICost(kind string, usd float64) {
+	if usd > 0 {
+		aiCost.WithLabelValues(kind).Add(usd)
+	}
+}
+
+// AITokens acumula n tokens do tipo dado (input|output|cache_creation|cache_read). Ignora n <= 0.
+func AITokens(kind, tokenType string, n int64) {
+	if n > 0 {
+		aiTokens.WithLabelValues(kind, tokenType).Add(float64(n))
+	}
 }
 
 // ObserveHTTP registra uma requisição da API. withLatency=false para conexões longas (SSE).

@@ -17,7 +17,8 @@ import (
 )
 
 // handleEnrich gera o NoteAi, persiste como entidade note_ai (sincroniza no próximo pull) e
-// atualiza o índice FTS (título + tldr + transcrição).
+// atualiza o índice FTS (título + tldr + transcrição). Nota cifrada (ephemeral): não grava a
+// entidade em texto claro nem indexa; o resultado volta só no `done` do SSE.
 func (s *Service) handleEnrich(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher) error {
 	var in EnrichInput
 	if err := json.Unmarshal(aj.Input, &in); err != nil {
@@ -29,6 +30,11 @@ func (s *Service) handleEnrich(ctx context.Context, aj dbgen.AiJob, pub *stream.
 	})
 	if err != nil || content == nil {
 		return err
+	}
+	// Nota cifrada: o worker não escreve a entidade em texto claro nem indexa no FTS. O cliente
+	// recebe o resultado pelo SSE, cifra e guarda localmente. O input/result do job é limpo.
+	if in.Ephemeral {
+		return s.doneEphemeral(ctx, aj, pub, content)
 	}
 	// Nota apagada enquanto o enrich rodava: não reindexa (some da busca/ask) nem mantém a citação.
 	deleted, derr := s.noteDeleted(ctx, aj.UserID, aj.NoteID)
@@ -78,6 +84,8 @@ func stripQuote(content []byte) []byte {
 }
 
 // handleChat responde ao chat (com --resume por thread) e persiste a resposta como chat_message.
+// Nota cifrada (ephemeral): não grava a entidade chat_message em texto claro; o resultado volta só
+// no `done` do SSE.
 func (s *Service) handleChat(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher) error {
 	var in ChatInput
 	if err := json.Unmarshal(aj.Input, &in); err != nil {
@@ -96,10 +104,17 @@ func (s *Service) handleChat(ctx context.Context, aj dbgen.AiJob, pub *stream.Pu
 	// Se a sessão existir, o prompt completo não é necessário; o run refaz sem resume se a sessão
 	// se perder. Por simplicidade reusamos o mesmo prompt (a CLI ignora o excesso com --resume).
 	res, err := s.runner.Run(ctx, withDefaults(req, aj, systemPrompt), forward(ctx, pub))
+	if err == nil {
+		s.recordUsage(ctx, aj, res)
+	}
 	if err == nil && res.NoConversation && resume != "" {
 		req.ResumeID = ""
 		req.Prompt = chatPrompt(in.Message, nil, in.Transcript, false)
 		res, err = s.runner.Run(ctx, withDefaults(req, aj, systemPrompt), forward(ctx, pub))
+		if err == nil {
+			// Soma o consumo da segunda execução (retry sem --resume) ao do job.
+			s.recordUsage(ctx, aj, res)
+		}
 	}
 	content, derr := s.finishRun(ctx, aj, pub, res, err, func(raw []byte) ([]byte, error) {
 		return ValidateChat(raw, allowed)
@@ -111,6 +126,9 @@ func (s *Service) handleChat(ctx context.Context, aj dbgen.AiJob, pub *stream.Pu
 		if serr := s.q.UpsertThreadSession(ctx, dbgen.UpsertThreadSessionParams{UserID: aj.UserID, ThreadID: in.ThreadID, ClaudeSessionID: res.SessionID}); serr != nil {
 			s.logger.Warn("ai: gravar sessão falhou", "err", serr.Error())
 		}
+	}
+	if in.Ephemeral {
+		return s.doneEphemeral(ctx, aj, pub, content)
 	}
 	msg := chatMessageData(in.ThreadID, content)
 	if err := s.writeEntity(ctx, aj.UserID, "chat_message", uuidString(aj.ID), msg); err != nil {
@@ -179,6 +197,32 @@ func (s *Service) handleDailyPrompt(ctx context.Context, aj dbgen.AiJob, pub *st
 	}
 	req := claude.Request{Prompt: dailyPromptPrompt(in.Date, notes), JSONSchema: DailyPromptSchema, Workdir: s.dir("daily")}
 	content, rerr := s.run(ctx, aj, pub, req, ValidateDailyPrompt)
+	if content == nil {
+		return rerr
+	}
+	return s.done(ctx, aj, pub, content)
+}
+
+// handleWeekly resume a semana a partir das notas conhecidas do índice (as cifradas ficam de fora:
+// elas não entram no note_search). As tarefas em aberto citadas (openTasks.noteId) são restritas a
+// essas notas; nomes/ids inventados são descartados pela validação.
+func (s *Service) handleWeekly(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher) error {
+	var in WeeklyInput
+	if err := json.Unmarshal(aj.Input, &in); err != nil {
+		return s.fail(ctx, aj, pub, "input inválido")
+	}
+	notes, err := s.recent(ctx, aj.UserID, maxWeeklyNotes)
+	if err != nil {
+		return fmt.Errorf("ai: notas da semana: %w", err)
+	}
+	cand := make(map[string]bool, len(notes))
+	for _, n := range notes {
+		cand[n.NoteID] = true
+	}
+	req := claude.Request{Prompt: weeklySummaryPrompt(in.WeekStart, notes), JSONSchema: WeeklySummarySchema, Workdir: s.dir("weekly")}
+	content, rerr := s.run(ctx, aj, pub, req, func(raw []byte) ([]byte, error) {
+		return ValidateWeeklySummary(raw, cand)
+	})
 	if content == nil {
 		return rerr
 	}
@@ -299,7 +343,7 @@ func (s *Service) candidates(ctx context.Context, userID pgtype.UUID, question s
 	return out, byID, nil
 }
 
-// recent devolve as notas mais recentes como pool de contexto (diário / disparador diário).
+// recent devolve as notas mais recentes como pool de contexto (diário / disparador diário / semana).
 func (s *Service) recent(ctx context.Context, userID pgtype.UUID, limit int) ([]askCandidate, error) {
 	//nolint:gosec // limit é constante do pacote.
 	rows, err := s.q.RecentNotes(ctx, dbgen.RecentNotesParams{UserID: userID, Lim: int32(limit)})

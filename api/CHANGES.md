@@ -73,3 +73,36 @@ registra as decisões que ajustaram/esclareceram o contrato v1 e o porquê.
     `"aiJson":"{...}"}`). Protege o resumo correto do servidor de ser sobrescrito por LWW por um
     cliente antigo que gravou `note_ai` vazio (bug do envelope SSE). Tombstones (`deleted:true`) são
     sempre aceitos, inclusive com `data` vazio — usados para purgar dados de demo que vazaram.
+
+## Fase 3 — consumo de IA, áudio, notas cifradas e resumo semanal (2026-10-24)
+
+13. **Consumo de IA registrado por pedido + `GET /ai/usage`.** O `ai_jobs` passou a guardar o
+    consumo informado pela CLI do Claude Code na linha `result` (migração `00008_ai_usage`):
+    `cost_usd` (estimativa em USD — o dono usa assinatura), `input/output/cache_creation/
+    cache_read_tokens`, `duration_ms`, `num_turns` e `resolved_model` (ex.: `claude-haiku-4-5-…`).
+    O worker acumula via `SetAIJobUsage` em todas as execuções (inclui o retry sem `--resume` do
+    chat). Novo `GET /ai/usage?from=&to=&tz=`: datas inclusivas (YYYY-MM-DD) no fuso IANA (padrão
+    `UTC`), padrão últimos 30 dias, intervalo máximo 366 dias, escopo por usuário; devolve
+    `totals`, série `days[]` por kind (no fuso), `byKind[]` e `quota{limit,used24h}`;
+    `costIsEstimate` é sempre `true`. Métricas novas `ai_cost_usd_total{kind}` e
+    `ai_tokens_total{kind,type}`.
+
+14. **`DELETE /notes/{id}/audio` → 204, idempotente.** Remove o áudio da nota e aborta o multipart
+    em andamento; responde `204` mesmo se objeto/upload não existirem. Escopo por usuário; id
+    restrito a `[A-Za-z0-9_-]`. Suporta o fluxo de "apagar áudio"/"apagar todos os dados" do app.
+
+15. **Notas cifradas (bloqueadas).** No sync, quando o `data` de `note`/`segment_set`/`note_ai`/
+    `chat_message` chega como `{ "enc":"v1", "nonce", "ct" }`: o servidor guarda como está, **não
+    indexa no FTS** (e remove o índice anterior da nota, tirando-a de `ask`/`diary_month`/
+    `weekly_summary`) e **aceita o `note_ai` cifrado sem exigir title/tldr** (a regra
+    `invalid_note_ai` não vale para cifrados). Nos endpoints de IA, `enrich` e `chat` aceitam
+    `"ephemeral": true`: o worker roda normalmente mas **não grava a entidade em texto claro nem
+    indexa**; o resultado volta só no `done` do SSE e o `ai_jobs.input`/`result` é limpo (`{}`) ao
+    fim. O consumo (custo/tokens) continua registrado (não é texto claro).
+
+16. **Resumo semanal — kind `weekly_summary` + `POST /ai/weekly-summary`.** Migração
+    `00009_weekly_summary` estende o CHECK de `ai_jobs.kind`. O endpoint recebe `{ weekStart, tz }`
+    (weekStart YYYY-MM-DD; tz IANA, padrão UTC) e responde `202` + SSE. O prompt (pt-BR) usa as
+    notas recentes do índice como contexto (as cifradas ficam de fora, pois não entram no
+    `note_search`), com saída estruturada estrita (`WeeklySummary`): `title`, `summary`,
+    `highlights`, `openTasks[]` (com `noteId` restrito às notas conhecidas) e `themes[]`.

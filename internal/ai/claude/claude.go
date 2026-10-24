@@ -76,12 +76,28 @@ type Event struct {
 	Text string
 }
 
+// Usage é o consumo de uma execução, lido da linha `result` da CLI. Os tokens de cache separam a
+// CRIAÇÃO do cache (mais caro) da LEITURA (mais barata). Alimenta o registro de consumo por pedido.
+type Usage struct {
+	InputTokens         int64
+	OutputTokens        int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
+}
+
 // Result é o resultado final da execução.
 type Result struct {
 	Text       string
 	Structured json.RawMessage
 	SessionID  string
 	CostUSD    float64
+	// Usage, DurationMs, NumTurns e ResolvedModel vêm da linha `result` da CLI (campos usage,
+	// duration_ms, num_turns e modelUsage). ResolvedModel é a primeira chave de modelUsage (o modelo
+	// que a CLI realmente usou, ex.: claude-haiku-4-5-20251001). Zero quando a CLI não os informa.
+	Usage         Usage
+	DurationMs    int64
+	NumTurns      int
+	ResolvedModel string
 	// RateLimited: a assinatura atingiu o limite de uso (reagendar, não é erro do pedido).
 	RateLimited bool
 	// RetryAt, quando não-zero, é o instante de reset informado pela CLI (mensagem "...|<unix>").
@@ -233,6 +249,17 @@ type streamLine struct {
 	StructuredOutput json.RawMessage `json:"structured_output"`
 	SessionID        string          `json:"session_id"`
 	TotalCostUSD     float64         `json:"total_cost_usd"`
+	// Consumo (linha result): usage agrega os tokens; modelUsage mapeia o(s) modelo(s) usado(s) —
+	// a primeira chave é o resolved_model. duration_ms/num_turns medem a execução.
+	Usage *struct {
+		InputTokens              int64 `json:"input_tokens"`
+		OutputTokens             int64 `json:"output_tokens"`
+		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	} `json:"usage"`
+	DurationMs int64           `json:"duration_ms"`
+	NumTurns   int             `json:"num_turns"`
+	ModelUsage json.RawMessage `json:"modelUsage"`
 }
 
 // structuredTool é o nome da ferramenta pela qual a CLI entrega a saída do --json-schema.
@@ -293,6 +320,17 @@ func parseStream(rd io.Reader, onEvent func(Event)) (Result, bool) {
 			res.SessionID = ln.SessionID
 			res.CostUSD = ln.TotalCostUSD
 			res.Text = ln.Result
+			res.DurationMs = ln.DurationMs
+			res.NumTurns = ln.NumTurns
+			res.ResolvedModel = firstJSONKey(ln.ModelUsage)
+			if ln.Usage != nil {
+				res.Usage = Usage{
+					InputTokens:         ln.Usage.InputTokens,
+					OutputTokens:        ln.Usage.OutputTokens,
+					CacheCreationTokens: ln.Usage.CacheCreationInputTokens,
+					CacheReadTokens:     ln.Usage.CacheReadInputTokens,
+				}
+			}
 			if len(ln.StructuredOutput) > 0 && string(ln.StructuredOutput) != "null" {
 				res.Structured = ln.StructuredOutput
 			}
@@ -308,6 +346,32 @@ func parseStream(rd io.Reader, onEvent func(Event)) (Result, bool) {
 		}
 	}
 	return res, sawResult
+}
+
+// firstJSONKey devolve a primeira chave de um objeto JSON preservando a ordem do texto (um
+// map[string]… do Go perderia a ordem). Vazio se não for um objeto ou estiver vazio. Usado para o
+// resolved_model (a primeira — em geral única — chave de modelUsage).
+func firstJSONKey(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	tok, err := dec.Token()
+	if err != nil {
+		return ""
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return ""
+	}
+	key, err := dec.Token()
+	if err != nil {
+		return ""
+	}
+	s, ok := key.(string)
+	if !ok {
+		return ""
+	}
+	return s
 }
 
 // describeTool resume o uso de ferramenta para a UI ("Pesquisando: …", "Lendo: url"). Ferramentas

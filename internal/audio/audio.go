@@ -69,6 +69,7 @@ type objectStore interface {
 	CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, parts []minio.CompletePart, opts minio.PutObjectOptions) (minio.UploadInfo, error)
 	AbortMultipartUpload(ctx context.Context, bucket, object, uploadID string) error
 	GetObject(ctx context.Context, bucket, object string, opts minio.GetObjectOptions) (io.ReadCloser, minio.ObjectInfo, http.Header, error)
+	RemoveObject(ctx context.Context, bucket, object string, opts minio.RemoveObjectOptions) error
 }
 
 // Service orquestra o multipart upload e o download.
@@ -306,6 +307,45 @@ func (s *Service) abort(ctx context.Context, key, uploadID string) {
 	}
 }
 
+// Delete apaga o áudio de uma nota (escopo por usuário) e é IDEMPOTENTE: se não há nada registrado
+// nem objeto, ainda assim retorna sucesso. Aborta o multipart em andamento (se houver) e remove o
+// objeto do bucket. Usado por DELETE /notes/{id}/audio (apagar a nota / "apagar todos os dados").
+func (s *Service) Delete(ctx context.Context, userID pgtype.UUID, noteID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("audio: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	qtx := s.q.WithTx(tx)
+
+	key := objectKey(uuidString(userID), noteID)
+	row, err := qtx.GetAudioForUpdate(ctx, dbgen.GetAudioForUpdateParams{UserID: userID, NoteID: noteID})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Nada registrado: remove um objeto órfão por garantia (idempotente) e confirma.
+		s.removeObject(ctx, key)
+		return tx.Commit(ctx)
+	case err != nil:
+		return fmt.Errorf("audio: carregar estado: %w", err)
+	}
+	// Multipart ainda aberto: aborta para não deixar partes penduradas no storage.
+	if row.UploadID != "" && !row.Completed {
+		s.abort(ctx, row.ObjectKey, row.UploadID)
+	}
+	s.removeObject(ctx, row.ObjectKey)
+	if err := qtx.DeleteAudio(ctx, dbgen.DeleteAudioParams{UserID: userID, NoteID: noteID}); err != nil {
+		return fmt.Errorf("audio: apagar estado: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// removeObject remove o objeto do bucket (best effort; "não existe" é sucesso — idempotência).
+func (s *Service) removeObject(ctx context.Context, key string) {
+	if err := s.store.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil && !isNoSuchKey(err) {
+		s.logger.Warn("audio: remover objeto falhou", slog.String("err", err.Error()))
+	}
+}
+
 // Content descreve o áudio a servir (completo ou um intervalo Range).
 type Content struct {
 	Body        io.ReadCloser
@@ -408,6 +448,10 @@ func parseRange(h string, total int64) (start, end int64, partial bool, err erro
 
 func isNoSuchUpload(err error) bool {
 	return minio.ToErrorResponse(err).Code == "NoSuchUpload"
+}
+
+func isNoSuchKey(err error) bool {
+	return minio.ToErrorResponse(err).Code == "NoSuchKey"
 }
 
 // mergePart devolve o mapa de ETags (jsonb) com a nova parte adicionada.

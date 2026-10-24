@@ -461,3 +461,71 @@ func compact(s string) string {
 	}
 	return b.String()
 }
+
+/* ── weekly_summary ───────────────────────────────────────────────────────────────────── */
+
+// WeeklyTask é uma tarefa em aberto citada no resumo semanal (noteId dentre as notas da semana).
+type WeeklyTask struct {
+	Text   string `json:"text"`
+	NoteID string `json:"noteId"`
+}
+
+// WeeklySummaryResult é a resposta de weekly_summary.
+type WeeklySummaryResult struct {
+	Title      string       `json:"title"`
+	Summary    string       `json:"summary"`
+	Highlights []string     `json:"highlights"`
+	OpenTasks  []WeeklyTask `json:"openTasks"`
+	Themes     []Theme      `json:"themes"`
+}
+
+// WeeklySummarySchema é o JSON Schema do resumo semanal.
+var WeeklySummarySchema = compact(`{
+  "type":"object","additionalProperties":false,
+  "required":["title","summary","highlights","openTasks","themes"],
+  "properties":{
+    "title":{"type":"string","description":"Título curto da semana, em pt-BR."},
+    "summary":{"type":"string","description":"Resumo da semana em pt-BR."},
+    "highlights":` + strList + `,
+    "openTasks":{"type":"array","items":{"type":"object","additionalProperties":false,
+      "required":["text","noteId"],
+      "properties":{
+        "text":{"type":"string"},
+        "noteId":{"type":"string","description":"Id da nota de origem, dentre as fornecidas; vazio se não houver."}
+      }}},
+    "themes":{"type":"array","items":{"type":"object","additionalProperties":false,
+      "required":["name","count"],
+      "properties":{"name":{"type":"string"},"count":{"type":"integer","minimum":0}}}}
+  }}`)
+
+// ValidateWeeklySummary valida o resumo semanal. As tarefas em aberto só mantêm um noteId que exista
+// entre as notas candidatas (o modelo não pode inventar um id); texto vazio é descartado.
+func ValidateWeeklySummary(raw []byte, candidates map[string]bool) ([]byte, error) {
+	var wk WeeklySummaryResult
+	if err := strictDecode(raw, &wk); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(wk.Title) == "" || strings.TrimSpace(wk.Summary) == "" {
+		return nil, fmt.Errorf("%w: title e summary são obrigatórios", ErrInvalidOutput)
+	}
+	wk.Title = capRunes(strings.TrimSpace(wk.Title), maxTitleLen)
+	wk.Summary = capRunes(strings.TrimSpace(wk.Summary), maxTextLen)
+	wk.Highlights = clean(wk.Highlights)
+	kept := make([]WeeklyTask, 0, len(wk.OpenTasks))
+	for _, tk := range wk.OpenTasks {
+		text := strings.TrimSpace(tk.Text)
+		if text == "" {
+			continue
+		}
+		noteID := tk.NoteID
+		if noteID != "" && !candidates[noteID] {
+			noteID = "" // id fora das candidatas: não emite um id que o cliente não tem.
+		}
+		kept = append(kept, WeeklyTask{Text: text, NoteID: noteID})
+	}
+	wk.OpenTasks = kept
+	if wk.Themes == nil {
+		wk.Themes = []Theme{}
+	}
+	return json.Marshal(wk)
+}

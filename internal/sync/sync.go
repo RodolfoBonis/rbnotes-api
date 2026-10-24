@@ -129,7 +129,7 @@ func (s *Service) Push(ctx context.Context, userID pgtype.UUID, changes []Change
 		// note_ai vivo precisa de conteúdo mínimo (title+tldr). Um note_ai vazio nunca é um resumo
 		// legítimo; aceitar sobrescreveria por LWW o resumo correto gerado no servidor. Tombstones
 		// (deleted) são sempre aceitos.
-		if ch.Entity == EntityNoteAi && !ch.Deleted && !noteAiHasContent(ch.Data) {
+		if ch.Entity == EntityNoteAi && !ch.Deleted && !isEncrypted(ch.Data) && !noteAiHasContent(ch.Data) { // nota cifrada é aceita como está (sem a regra de title/tldr)
 			return res, fmt.Errorf("%w: id %q", ErrInvalidNoteAi, ch.ID)
 		}
 		// Relógio do cliente adiantado demais: limita o updatedAt a now()+skew para não vencer o
@@ -199,7 +199,7 @@ func (s *Service) indexNote(ctx context.Context, q *dbgen.Queries, entity string
 	if entity != EntityNote {
 		return nil
 	}
-	if ch.Deleted {
+	if ch.Deleted || isEncrypted(ch.Data) { // apagada OU cifrada: remove do índice (some de ask/diary_month/weekly_summary)
 		return q.DeleteNoteSearch(ctx, dbgen.DeleteNoteSearchParams{UserID: userID, NoteID: ch.ID})
 	}
 	var payload struct {
@@ -341,6 +341,22 @@ func upsertEntity(ctx context.Context, q *dbgen.Queries, entity string, userID p
 		return fmt.Errorf("sync: upsert %s: %w", entity, err)
 	}
 	return nil
+}
+
+// isEncrypted indica que o data de uma entidade é um envelope CIFRADO do cliente
+// ({"enc":"v1","nonce":"<b64>","ct":"<b64>"}). O servidor guarda o valor como está; não indexa no
+// FTS e não usa o conteúdo em nenhum fluxo de IA (ask/diary_month/weekly_summary) — não tem a chave.
+func isEncrypted(data []byte) bool {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return false
+	}
+	var env struct {
+		Enc string `json:"enc"`
+	}
+	if json.Unmarshal(data, &env) != nil {
+		return false
+	}
+	return env.Enc != ""
 }
 
 // noteAiHasContent indica se o data de um note_ai tem conteúdo mínimo (title e tldr não vazios).

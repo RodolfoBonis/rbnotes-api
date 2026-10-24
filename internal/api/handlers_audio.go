@@ -174,3 +174,20 @@ func isSafeID(s string) bool {
 	}
 	return true
 }
+
+// deleteAudio — DELETE /notes/{id}/audio: apaga o áudio da nota. Responde 204 e é IDEMPOTENTE (204
+// mesmo se o objeto/upload não existirem). Escopo por usuário; aborta o multipart em andamento.
+func (h *Handlers) deleteAudio(w http.ResponseWriter, r *http.Request) {
+	if !h.audioEnabled(w, r) {
+		return
+	}
+	noteID, ok := h.safeNoteID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.audio.Delete(r.Context(), currentUser(r).ID, noteID); err != nil {
+		writeInternal(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

@@ -27,6 +27,22 @@ func (q *Queries) CompleteAudio(ctx context.Context, arg CompleteAudioParams) er
 	return err
 }
 
+const deleteAudio = `-- name: DeleteAudio :exec
+DELETE FROM note_audio WHERE user_id = $1 AND note_id = $2
+`
+
+type DeleteAudioParams struct {
+	UserID pgtype.UUID
+	NoteID string
+}
+
+// DeleteAudio apaga o estado do upload/áudio da nota (escopo por usuário). Idempotente na borda: o
+// serviço aborta o multipart em andamento e remove o objeto antes de chamar isto.
+func (q *Queries) DeleteAudio(ctx context.Context, arg DeleteAudioParams) error {
+	_, err := q.db.Exec(ctx, deleteAudio, arg.UserID, arg.NoteID)
+	return err
+}
+
 const getAudio = `-- name: GetAudio :one
 SELECT user_id, note_id, object_key, upload_id, total_parts, parts, content_type, size, completed, created_at, updated_at, part_sizes FROM note_audio WHERE user_id = $1 AND note_id = $2
 `

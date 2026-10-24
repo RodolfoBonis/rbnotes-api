@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +35,7 @@ const (
 	KindCollectionRule = "collection_rule"
 	KindDiaryMonth     = "diary_month"
 	KindDailyPrompt    = "daily_prompt"
+	KindWeeklySummary  = "weekly_summary"
 )
 
 // queueKind é o kind na fila (jobs). Todos os pedidos de IA usam o mesmo; ai_jobs.kind distingue.
@@ -46,6 +49,7 @@ const (
 	maxAskCandidates = 12
 	maxDiaryNotes    = 60
 	maxDailyNotes    = 8
+	maxWeeklyNotes   = 40
 	maxChatMessage   = 8000
 	// maxTranscriptSegments / maxTranscriptChars limitam o tamanho de uma transcrição por request.
 	maxTranscriptSegments = 5000
@@ -118,7 +122,11 @@ func New(d Deps) *Service {
 	if m == "" {
 		m = "sonnet"
 	}
-	return &Service{q: d.Queries, pool: d.Pool, queue: d.Queue, rdb: d.Redis, runner: d.Runner, model: m, workdir: d.Workdir, dailyLimit: d.DailyLimit, retention: d.Retention, logger: d.Logger}
+	logger := d.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+	return &Service{q: d.Queries, pool: d.Pool, queue: d.Queue, rdb: d.Redis, runner: d.Runner, model: m, workdir: d.Workdir, dailyLimit: d.DailyLimit, retention: d.Retention, logger: logger}
 }
 
 // jobPayload é o payload do job na fila.
@@ -137,6 +145,9 @@ type EnrichInput struct {
 	Length       string    `json:"length"`
 	Model        string    `json:"model"`
 	ExtractTasks bool      `json:"extractTasks"`
+	// Ephemeral marca uma nota CIFRADA: o worker não grava a entidade note_ai em texto claro nem
+	// indexa; o resultado volta só no `done` do SSE e o input/result do ai_jobs é limpo no fim.
+	Ephemeral bool `json:"ephemeral"`
 }
 
 // ChatInput é o corpo de POST /ai/notes/{id}/chat. Transcript é opcional (ancora as citações).
@@ -145,6 +156,9 @@ type ChatInput struct {
 	Message    string    `json:"message"`
 	Transcript []Segment `json:"transcript"`
 	Model      string    `json:"model"`
+	// Ephemeral marca uma nota CIFRADA: o worker não grava a entidade chat_message em texto claro; o
+	// resultado volta só no `done` do SSE e o input/result do ai_jobs é limpo no fim.
+	Ephemeral bool `json:"ephemeral"`
 }
 
 // AskInput é o corpo de POST /ai/ask.
@@ -169,6 +183,15 @@ type DiaryInput struct {
 type PromptInput struct {
 	Date  string `json:"date"`
 	Model string `json:"model"`
+}
+
+// WeeklyInput é o corpo de POST /ai/weekly-summary. WeekStart é a segunda-feira da semana (YYYY-MM-DD)
+// e TZ é o fuso IANA do dono (padrão UTC) — só documentam a semana no prompt; o worker usa as notas
+// recentes do índice como contexto (mesma limitação do diary_month).
+type WeeklyInput struct {
+	WeekStart string `json:"weekStart"`
+	TZ        string `json:"tz"`
+	Model     string `json:"model"`
 }
 
 /* ── Pedidos (API) ─────────────────────────────────────────────────────────────────────── */
@@ -240,6 +263,21 @@ func (s *Service) RequestDailyPrompt(ctx context.Context, userID pgtype.UUID, in
 		return dbgen.AiJob{}, fmt.Errorf("%w: date deve ser YYYY-MM-DD", ErrBadInput)
 	}
 	return s.request(ctx, userID, KindDailyPrompt, "", "", in.Model, in)
+}
+
+// RequestWeeklySummary enfileira o resumo da semana que começa em weekStart ("YYYY-MM-DD"). tz é
+// validado como IANA (padrão UTC).
+func (s *Service) RequestWeeklySummary(ctx context.Context, userID pgtype.UUID, in WeeklyInput) (dbgen.AiJob, error) {
+	if _, err := time.Parse("2006-01-02", in.WeekStart); err != nil {
+		return dbgen.AiJob{}, fmt.Errorf("%w: weekStart deve ser YYYY-MM-DD", ErrBadInput)
+	}
+	if in.TZ == "" {
+		in.TZ = "UTC"
+	}
+	if _, err := time.LoadLocation(in.TZ); err != nil {
+		return dbgen.AiJob{}, fmt.Errorf("%w: tz deve ser um fuso IANA (ex.: America/Sao_Paulo)", ErrBadInput)
+	}
+	return s.request(ctx, userID, KindWeeklySummary, "", "", in.Model, in)
 }
 
 // request valida o modelo, aplica a cota, cria o ai_jobs e enfileira o job — tudo numa ÚNICA
@@ -366,6 +404,8 @@ func (s *Service) Handle(ctx context.Context, job queue.Job) error {
 		return s.handleDiary(ctx, aj, pub)
 	case KindDailyPrompt:
 		return s.handleDailyPrompt(ctx, aj, pub)
+	case KindWeeklySummary:
+		return s.handleWeekly(ctx, aj, pub)
 	default:
 		return queue.Permanent(fmt.Errorf("ai: kind desconhecido %q", aj.Kind))
 	}
@@ -373,16 +413,23 @@ func (s *Service) Handle(ctx context.Context, job queue.Job) error {
 
 // run executa a CLI repassando os eventos à stream e tratando os resultados comuns. Devolve o JSON
 // estruturado validado por validate, ou um erro (permanente para falha de modelo; não-permanente
-// para rate limit / falha de infra).
+// para rate limit / falha de infra). O consumo (custo/tokens) de CADA execução é registrado via
+// recordUsage logo após a CLI retornar, cobrindo os caminhos done/fail/rateLimited.
 func (s *Service) run(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher, req claude.Request, validate func([]byte) ([]byte, error)) ([]byte, error) {
 	req.SystemPrompt = systemPrompt
 	req.Model = aj.Model
 	req.AllowedTools = AllowedTools
 	res, err := s.runner.Run(ctx, req, forward(ctx, pub))
+	if err == nil {
+		s.recordUsage(ctx, aj, res)
+	}
 	if err == nil && res.NoConversation && req.ResumeID != "" {
-		// Sessão perdida (pod recriado): refaz sem resume.
+		// Sessão perdida (pod recriado): refaz sem resume. Soma o consumo da segunda execução.
 		req.ResumeID = ""
 		res, err = s.runner.Run(ctx, req, forward(ctx, pub))
+		if err == nil {
+			s.recordUsage(ctx, aj, res)
+		}
 	}
 	if err != nil {
 		s.closeStream(ctx, pub, stream.TypeStatus, "Falha ao iniciar a IA — tentando de novo")
@@ -399,6 +446,35 @@ func (s *Service) run(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher
 		return nil, s.fail(ctx, aj, pub, verr.Error())
 	}
 	return content, nil
+}
+
+// recordUsage ACUMULA o consumo de UMA execução da CLI no ai_jobs (custo/tokens/duração/turnos e o
+// modelo resolvido) e alimenta as métricas ai_cost_usd_total / ai_tokens_total. Chamado uma vez por
+// execução (incluindo o retry sem --resume), então done/fail/rateLimited sempre têm o consumo já
+// contabilizado. Roda em WithoutCancel para sobreviver a um cancelamento tardio do pai.
+func (s *Service) recordUsage(ctx context.Context, aj dbgen.AiJob, res claude.Result) {
+	bg, cancel := bookkeepingCtx(ctx)
+	defer cancel()
+	//nolint:gosec // duration_ms/num_turns da CLI cabem em int32 com folga.
+	err := s.q.SetAIJobUsage(bg, dbgen.SetAIJobUsageParams{
+		ID:                  aj.ID,
+		CostUsd:             numericFromFloat(res.CostUSD),
+		InputTokens:         res.Usage.InputTokens,
+		OutputTokens:        res.Usage.OutputTokens,
+		CacheCreationTokens: res.Usage.CacheCreationTokens,
+		CacheReadTokens:     res.Usage.CacheReadTokens,
+		DurationMs:          int32(res.DurationMs),
+		NumTurns:            int32(res.NumTurns),
+		ResolvedModel:       res.ResolvedModel,
+	})
+	if err != nil {
+		s.logger.ErrorContext(bg, "ai: registrar consumo falhou", slog.String("job_id", uuidString(aj.ID)), slog.String("err", err.Error()))
+	}
+	metrics.AICost(aj.Kind, res.CostUSD)
+	metrics.AITokens(aj.Kind, "input", res.Usage.InputTokens)
+	metrics.AITokens(aj.Kind, "output", res.Usage.OutputTokens)
+	metrics.AITokens(aj.Kind, "cache_creation", res.Usage.CacheCreationTokens)
+	metrics.AITokens(aj.Kind, "cache_read", res.Usage.CacheReadTokens)
 }
 
 // fail marca o job com erro, encerra a stream e devolve um erro permanente (não reprocessa). O
@@ -428,6 +504,21 @@ func (s *Service) done(ctx context.Context, aj dbgen.AiJob, pub *stream.Publishe
 	bg, cancel := bookkeepingCtx(ctx)
 	defer cancel()
 	if err := s.q.CompleteAIJob(bg, dbgen.CompleteAIJobParams{ID: aj.ID, Result: content, Model: aj.Model}); err != nil {
+		return err
+	}
+	metrics.AIJob(aj.Kind, "ok")
+	s.closeStream(bg, pub, stream.TypeDone, string(content))
+	return nil
+}
+
+// doneEphemeral conclui um job de nota CIFRADA: NÃO persiste o resultado em texto claro (ai_jobs.result
+// = {}) e esvazia o input (que carregava a transcrição). O resultado volta só no `done` do SSE (o
+// cliente cifra e guarda localmente). O consumo (cost_usd/tokens) já foi contabilizado por recordUsage
+// e é preservado — não é texto claro.
+func (s *Service) doneEphemeral(ctx context.Context, aj dbgen.AiJob, pub *stream.Publisher, content []byte) error {
+	bg, cancel := bookkeepingCtx(ctx)
+	defer cancel()
+	if err := s.q.CompleteAIJobEphemeral(bg, dbgen.CompleteAIJobEphemeralParams{ID: aj.ID, Model: aj.Model}); err != nil {
 		return err
 	}
 	metrics.AIJob(aj.Kind, "ok")
@@ -540,6 +631,29 @@ func uuidString(u pgtype.UUID) string {
 	}
 	b := u.Bytes
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// numericFromFloat converte um custo em float para pgtype.Numeric (6 casas, como a coluna
+// numeric(12,6)). A string formatada é sempre numeric válido; em falha improvável, cai para zero
+// válido (nunca NULL, que anularia a soma acumulada).
+func numericFromFloat(f float64) pgtype.Numeric {
+	var n pgtype.Numeric
+	if err := n.Scan(strconv.FormatFloat(f, 'f', 6, 64)); err != nil || !n.Valid {
+		return pgtype.Numeric{Int: big.NewInt(0), Valid: true}
+	}
+	return n
+}
+
+// numericToFloat converte um pgtype.Numeric (soma de custo) para float64 (0 se inválido).
+func numericToFloat(n pgtype.Numeric) float64 {
+	if !n.Valid {
+		return 0
+	}
+	f, err := n.Float64Value()
+	if err != nil {
+		return 0
+	}
+	return f.Float64
 }
 
 func truncate(s string, n int) string {

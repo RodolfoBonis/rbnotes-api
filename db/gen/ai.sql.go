@@ -11,6 +11,87 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const aIUsageByDay = `-- name: AIUsageByDay :many
+SELECT
+    (created_at AT TIME ZONE $1::text)::date AS day,
+    kind,
+    count(*)::bigint                                AS requests,
+    count(*) FILTER (WHERE status = 'done')::bigint AS done,
+    count(*) FILTER (WHERE status = 'error')::bigint AS errors,
+    coalesce(sum(input_tokens), 0)::bigint          AS input_tokens,
+    coalesce(sum(output_tokens), 0)::bigint         AS output_tokens,
+    coalesce(sum(cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
+    coalesce(sum(cache_read_tokens), 0)::bigint     AS cache_read_tokens,
+    coalesce(sum(cost_usd), 0)::numeric             AS cost_usd,
+    coalesce(sum(duration_ms), 0)::bigint           AS duration_ms
+FROM ai_jobs
+WHERE user_id = $2
+  AND created_at >= $3
+  AND created_at <  $4
+GROUP BY day, kind
+ORDER BY day, kind
+`
+
+type AIUsageByDayParams struct {
+	Tz     string
+	UserID pgtype.UUID
+	FromTs pgtype.Timestamptz
+	ToTs   pgtype.Timestamptz
+}
+
+type AIUsageByDayRow struct {
+	Day                 pgtype.Date
+	Kind                string
+	Requests            int64
+	Done                int64
+	Errors              int64
+	InputTokens         int64
+	OutputTokens        int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
+	CostUsd             pgtype.Numeric
+	DurationMs          int64
+}
+
+// AIUsageByDay agrega o consumo por dia (no fuso IANA informado) e por kind, no intervalo
+// [from_ts, to_ts). Escopo por usuário. O custo é estimativa (preço de API). Alimenta GET /v1/ai/usage.
+func (q *Queries) AIUsageByDay(ctx context.Context, arg AIUsageByDayParams) ([]AIUsageByDayRow, error) {
+	rows, err := q.db.Query(ctx, aIUsageByDay,
+		arg.Tz,
+		arg.UserID,
+		arg.FromTs,
+		arg.ToTs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AIUsageByDayRow{}
+	for rows.Next() {
+		var i AIUsageByDayRow
+		if err := rows.Scan(
+			&i.Day,
+			&i.Kind,
+			&i.Requests,
+			&i.Done,
+			&i.Errors,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.CacheCreationTokens,
+			&i.CacheReadTokens,
+			&i.CostUsd,
+			&i.DurationMs,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const clearOldAIJobData = `-- name: ClearOldAIJobData :exec
 UPDATE ai_jobs SET input = '{}'::jsonb, result = NULL
 WHERE updated_at < $1 AND (input <> '{}'::jsonb OR result IS NOT NULL)
@@ -38,6 +119,24 @@ func (q *Queries) CompleteAIJob(ctx context.Context, arg CompleteAIJobParams) er
 	return err
 }
 
+const completeAIJobEphemeral = `-- name: CompleteAIJobEphemeral :exec
+UPDATE ai_jobs SET status = 'done', result = '{}'::jsonb, input = '{}'::jsonb, model = $2, error = '', updated_at = now()
+WHERE id = $1
+`
+
+type CompleteAIJobEphemeralParams struct {
+	ID    pgtype.UUID
+	Model string
+}
+
+// ── consumo de IA (Fase 3) ────────────────────────────────────────────────────────────────
+// CompleteAIJobEphemeral conclui um job EFÊMERO (nota cifrada): não persiste o resultado em texto
+// claro e esvazia o input (que carregava a transcrição). O resultado volta só no `done` do SSE.
+func (q *Queries) CompleteAIJobEphemeral(ctx context.Context, arg CompleteAIJobEphemeralParams) error {
+	_, err := q.db.Exec(ctx, completeAIJobEphemeral, arg.ID, arg.Model)
+	return err
+}
+
 const countAIRequestsSince = `-- name: CountAIRequestsSince :one
 SELECT count(*) FROM ai_requests WHERE user_id = $1 AND created_at >= $2
 `
@@ -58,7 +157,7 @@ func (q *Queries) CountAIRequestsSince(ctx context.Context, arg CountAIRequestsS
 const createAIJob = `-- name: CreateAIJob :one
 INSERT INTO ai_jobs (user_id, kind, note_id, thread_id, model, input)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, user_id, kind, status, note_id, thread_id, model, input, result, error, created_at, updated_at
+RETURNING id, user_id, kind, status, note_id, thread_id, model, input, result, error, created_at, updated_at, cost_usd, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, duration_ms, num_turns, resolved_model
 `
 
 type CreateAIJobParams struct {
@@ -94,6 +193,14 @@ func (q *Queries) CreateAIJob(ctx context.Context, arg CreateAIJobParams) (AiJob
 		&i.Error,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CostUsd,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheCreationTokens,
+		&i.CacheReadTokens,
+		&i.DurationMs,
+		&i.NumTurns,
+		&i.ResolvedModel,
 	)
 	return i, err
 }
@@ -137,7 +244,7 @@ func (q *Queries) FailAIJob(ctx context.Context, arg FailAIJobParams) error {
 }
 
 const getAIJob = `-- name: GetAIJob :one
-SELECT id, user_id, kind, status, note_id, thread_id, model, input, result, error, created_at, updated_at FROM ai_jobs WHERE id = $1
+SELECT id, user_id, kind, status, note_id, thread_id, model, input, result, error, created_at, updated_at, cost_usd, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, duration_ms, num_turns, resolved_model FROM ai_jobs WHERE id = $1
 `
 
 func (q *Queries) GetAIJob(ctx context.Context, id pgtype.UUID) (AiJob, error) {
@@ -156,6 +263,14 @@ func (q *Queries) GetAIJob(ctx context.Context, id pgtype.UUID) (AiJob, error) {
 		&i.Error,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CostUsd,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheCreationTokens,
+		&i.CacheReadTokens,
+		&i.DurationMs,
+		&i.NumTurns,
+		&i.ResolvedModel,
 	)
 	return i, err
 }
@@ -340,6 +455,49 @@ UPDATE ai_jobs SET status = 'running', updated_at = now() WHERE id = $1
 
 func (q *Queries) SetAIJobRunning(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, setAIJobRunning, id)
+	return err
+}
+
+const setAIJobUsage = `-- name: SetAIJobUsage :exec
+UPDATE ai_jobs SET
+    cost_usd              = cost_usd              + $1::numeric,
+    input_tokens          = input_tokens          + $2,
+    output_tokens         = output_tokens         + $3,
+    cache_creation_tokens = cache_creation_tokens + $4,
+    cache_read_tokens     = cache_read_tokens     + $5,
+    duration_ms           = duration_ms           + $6,
+    num_turns             = num_turns             + $7,
+    resolved_model        = CASE WHEN $8::text <> '' THEN $8::text ELSE resolved_model END,
+    updated_at            = now()
+WHERE id = $9
+`
+
+type SetAIJobUsageParams struct {
+	CostUsd             pgtype.Numeric
+	InputTokens         int64
+	OutputTokens        int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
+	DurationMs          int32
+	NumTurns            int32
+	ResolvedModel       string
+	ID                  pgtype.UUID
+}
+
+// SetAIJobUsage ACUMULA o consumo informado pela CLI (ver internal/ai/claude). Acumula para somar as
+// duas execuções do retry sem --resume do chat. O resolved_model fica com o último valor não-vazio.
+func (q *Queries) SetAIJobUsage(ctx context.Context, arg SetAIJobUsageParams) error {
+	_, err := q.db.Exec(ctx, setAIJobUsage,
+		arg.CostUsd,
+		arg.InputTokens,
+		arg.OutputTokens,
+		arg.CacheCreationTokens,
+		arg.CacheReadTokens,
+		arg.DurationMs,
+		arg.NumTurns,
+		arg.ResolvedModel,
+		arg.ID,
+	)
 	return err
 }
 

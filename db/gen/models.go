@@ -19,18 +19,26 @@ type Action struct {
 }
 
 type AiJob struct {
-	ID        pgtype.UUID
-	UserID    pgtype.UUID
-	Kind      string
-	Status    string
-	NoteID    string
-	ThreadID  string
-	Model     string
-	Input     []byte
-	Result    []byte
-	Error     string
-	CreatedAt pgtype.Timestamptz
-	UpdatedAt pgtype.Timestamptz
+	ID                  pgtype.UUID
+	UserID              pgtype.UUID
+	Kind                string
+	Status              string
+	NoteID              string
+	ThreadID            string
+	Model               string
+	Input               []byte
+	Result              []byte
+	Error               string
+	CreatedAt           pgtype.Timestamptz
+	UpdatedAt           pgtype.Timestamptz
+	CostUsd             pgtype.Numeric
+	InputTokens         int64
+	OutputTokens        int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
+	DurationMs          int32
+	NumTurns            int32
+	ResolvedModel       string
 }
 
 type AiRequest struct {

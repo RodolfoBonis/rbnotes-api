@@ -28,3 +28,8 @@ RETURNING *;
 -- name: CompleteAudio :exec
 UPDATE note_audio SET completed = true, size = $3, updated_at = now()
 WHERE user_id = $1 AND note_id = $2;
+
+-- DeleteAudio apaga o estado do upload/áudio da nota (escopo por usuário). Idempotente na borda: o
+-- serviço aborta o multipart em andamento e remove o objeto antes de chamar isto.
+-- name: DeleteAudio :exec
+DELETE FROM note_audio WHERE user_id = $1 AND note_id = $2;

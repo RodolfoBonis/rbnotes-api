@@ -104,3 +104,47 @@ SELECT note_id, title, tldr FROM note_search
 WHERE user_id = $1
 ORDER BY updated_at DESC
 LIMIT sqlc.arg(lim)::int;
+
+-- ── consumo de IA (Fase 3) ────────────────────────────────────────────────────────────────
+-- CompleteAIJobEphemeral conclui um job EFÊMERO (nota cifrada): não persiste o resultado em texto
+-- claro e esvazia o input (que carregava a transcrição). O resultado volta só no `done` do SSE.
+-- name: CompleteAIJobEphemeral :exec
+UPDATE ai_jobs SET status = 'done', result = '{}'::jsonb, input = '{}'::jsonb, model = $2, error = '', updated_at = now()
+WHERE id = $1;
+
+-- SetAIJobUsage ACUMULA o consumo informado pela CLI (ver internal/ai/claude). Acumula para somar as
+-- duas execuções do retry sem --resume do chat. O resolved_model fica com o último valor não-vazio.
+-- name: SetAIJobUsage :exec
+UPDATE ai_jobs SET
+    cost_usd              = cost_usd              + sqlc.arg(cost_usd)::numeric,
+    input_tokens          = input_tokens          + sqlc.arg(input_tokens),
+    output_tokens         = output_tokens         + sqlc.arg(output_tokens),
+    cache_creation_tokens = cache_creation_tokens + sqlc.arg(cache_creation_tokens),
+    cache_read_tokens     = cache_read_tokens     + sqlc.arg(cache_read_tokens),
+    duration_ms           = duration_ms           + sqlc.arg(duration_ms),
+    num_turns             = num_turns             + sqlc.arg(num_turns),
+    resolved_model        = CASE WHEN sqlc.arg(resolved_model)::text <> '' THEN sqlc.arg(resolved_model)::text ELSE resolved_model END,
+    updated_at            = now()
+WHERE id = sqlc.arg(id);
+
+-- AIUsageByDay agrega o consumo por dia (no fuso IANA informado) e por kind, no intervalo
+-- [from_ts, to_ts). Escopo por usuário. O custo é estimativa (preço de API). Alimenta GET /v1/ai/usage.
+-- name: AIUsageByDay :many
+SELECT
+    (created_at AT TIME ZONE sqlc.arg(tz)::text)::date AS day,
+    kind,
+    count(*)::bigint                                AS requests,
+    count(*) FILTER (WHERE status = 'done')::bigint AS done,
+    count(*) FILTER (WHERE status = 'error')::bigint AS errors,
+    coalesce(sum(input_tokens), 0)::bigint          AS input_tokens,
+    coalesce(sum(output_tokens), 0)::bigint         AS output_tokens,
+    coalesce(sum(cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
+    coalesce(sum(cache_read_tokens), 0)::bigint     AS cache_read_tokens,
+    coalesce(sum(cost_usd), 0)::numeric             AS cost_usd,
+    coalesce(sum(duration_ms), 0)::bigint           AS duration_ms
+FROM ai_jobs
+WHERE user_id = sqlc.arg(user_id)
+  AND created_at >= sqlc.arg(from_ts)
+  AND created_at <  sqlc.arg(to_ts)
+GROUP BY day, kind
+ORDER BY day, kind;

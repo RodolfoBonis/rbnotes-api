@@ -154,3 +154,34 @@ func TestParseResetUnix(t *testing.T) {
 	require.True(t, parseResetUnix("sem reset").IsZero())
 	require.True(t, parseResetUnix("limit|100").IsZero(), "reset no passado é ignorado")
 }
+
+// TestParseStreamUsage lê a fixture nova capturada da CLI real (saída estruturada com consumo) e
+// confere que a linha `result` é decodificada em Usage/DurationMs/NumTurns/ResolvedModel.
+func TestParseStreamUsage(t *testing.T) {
+	f, err := os.Open("testdata/usage.jsonl")
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+
+	res, ok := parseStream(f, nil)
+	require.True(t, ok)
+	require.Empty(t, res.Err)
+
+	require.Equal(t, int64(9), res.Usage.InputTokens)
+	require.Equal(t, int64(158), res.Usage.OutputTokens)
+	require.Equal(t, int64(7915), res.Usage.CacheCreationTokens)
+	require.Equal(t, int64(0), res.Usage.CacheReadTokens)
+	require.Equal(t, int64(3033), res.DurationMs)
+	require.Equal(t, 2, res.NumTurns)
+	require.Equal(t, "claude-haiku-4-5-20251001", res.ResolvedModel)
+	require.InDelta(t, 0.016629, res.CostUSD, 1e-9)
+	require.NotEmpty(t, res.Structured, "a fixture traz saída estruturada")
+}
+
+func TestFirstJSONKey(t *testing.T) {
+	require.Equal(t, "claude-haiku-4-5-20251001",
+		firstJSONKey([]byte(`{"claude-haiku-4-5-20251001":{"x":1},"outro":{}}`)))
+	require.Empty(t, firstJSONKey([]byte(`{}`)))
+	require.Empty(t, firstJSONKey(nil))
+	require.Empty(t, firstJSONKey([]byte(`"nao-objeto"`)))
+	require.Empty(t, firstJSONKey([]byte(`[1,2]`)))
+}

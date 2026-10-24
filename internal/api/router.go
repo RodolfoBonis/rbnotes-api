@@ -86,6 +86,11 @@ func NewRouter(d RouterDeps) http.Handler {
 			r.Post("/ai/collections/rule", h.collectionRule)
 			r.Post("/ai/diary/month", h.diaryMonth)
 			r.Get("/ai/diary/prompt", h.dailyPrompt)
+			r.Post("/ai/weekly-summary", h.weeklySummary)
+			r.Get("/ai/usage", h.aiUsage)
+
+			// Apagar o áudio de uma nota (rápido): fica no grupo com timeout de request.
+			r.Delete("/notes/{id}/audio", h.deleteAudio)
 		})
 	})
 
