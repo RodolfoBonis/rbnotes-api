@@ -73,7 +73,7 @@ func TestStreamFinalStateCarriesResult(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, final)
 	require.Equal(t, stream.TypeDone, final.typ)
-	require.Equal(t, string(result), final.data, "o done final carrega o resultado do banco")
+	require.JSONEq(t, string(result), final.data, "o done final carrega o resultado do banco (JSONB normaliza a formatação)")
 
 	// Job com erro: o final traz a mensagem de erro.
 	ejob := seedAIJob(t, q, u, "error", nil, "A IA não conseguiu responder.")
